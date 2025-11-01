@@ -36,7 +36,9 @@ app.post('/api/extract', upload.array('files'), async (req, res) => {
   try {
     const files = req.files || []
     if (!files.length) return res.status(400).json({ error: 'No files uploaded' })
-    const result = await extractFromFiles(files)
+    const debug = String(req.query.debug || req.headers['x-debug'] || '').toLowerCase()
+    const debugEnabled = debug === '1' || debug === 'true' || debug === 'yes'
+    const result = await extractFromFiles(files, { debug: debugEnabled })
     res.json(result)
   } catch (e) {
     console.error(e)

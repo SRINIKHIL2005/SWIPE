@@ -51,12 +51,14 @@ Rules:
 - Return ONLY JSON. No additional text.
 `
 
-export async function extractFromFiles(files) {
+export async function extractFromFiles(files, { debug=false } = {}) {
   const merged = { products: [], customers: [], invoices: [] }
+  const debugLog = []
   for (const f of files) {
     const ext = (f.originalname.split('.').pop() || '').toLowerCase()
+    if (debug) debugLog.push({ step: 'file-received', name: f.originalname, mimetype: f.mimetype, ext, size: f.size })
     if (['xls','xlsx','csv'].includes(ext)) {
-      let fromX = await extractFromExcelBuffer(f.buffer)
+      let fromX = await extractFromExcelBuffer(f.buffer, debug ? debugLog : undefined)
       // If Excel heuristic yielded nothing and AI is available, try CSV-text AI, then file-upload AI as last resort
       if (API_KEY && (!fromX.products?.length && !fromX.customers?.length && !fromX.invoices?.length)) {
         try {
@@ -64,13 +66,15 @@ export async function extractFromFiles(files) {
           const sheet = wb.Sheets[wb.SheetNames[0]]
           const csvText = xlsx.utils.sheet_to_csv(sheet)
           if (csvText && csvText.trim().length > 0) {
-            const aiFromCsv = await extractWithGeminiFromCSV(csvText, f.originalname)
+            if (debug) debugLog.push({ step: 'excel-csv-fallback', note: 'Try AI from CSV text', chars: csvText.length })
+            const aiFromCsv = await extractWithGeminiFromCSV(csvText, f.originalname, debug ? debugLog : undefined)
             if (aiFromCsv && (aiFromCsv.products?.length || aiFromCsv.customers?.length || aiFromCsv.invoices?.length)) {
               fromX = aiFromCsv
             }
           }
         } catch {}
         if (!fromX.products?.length && !fromX.customers?.length && !fromX.invoices?.length) {
+          if (debug) debugLog.push({ step: 'excel-binary-fallback', note: 'Try AI from binary spreadsheet' })
           const aiFallback = await extractWithGemini({
             buffer: f.buffer,
             originalname: f.originalname,
@@ -81,7 +85,8 @@ export async function extractFromFiles(files) {
       }
       merge(merged, fromX)
     } else if (API_KEY) {
-      const fromAI = await extractWithGemini(f)
+      if (debug) debugLog.push({ step: 'non-excel-file', note: 'Use Gemini', name: f.originalname })
+      const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
       merge(merged, fromAI)
     } else {
       // Fallback minimal when no API key
@@ -89,7 +94,18 @@ export async function extractFromFiles(files) {
     }
   }
   // Normalize: map names to ids and compute totals
-  return normalize(merged)
+  const normalized = normalize(merged)
+  if (debug) {
+    normalized._debug = {
+      steps: debugLog,
+      counts: {
+        products: normalized.products.length,
+        customers: normalized.customers.length,
+        invoices: normalized.invoices.length
+      }
+    }
+  }
+  return normalized
 }
 
 function merge(target, src) {
@@ -98,7 +114,7 @@ function merge(target, src) {
   target.invoices.push(...(src.invoices||[]))
 }
 
-async function extractFromExcelBuffer(buf) {
+async function extractFromExcelBuffer(buf, debugLog) {
   const wb = xlsx.read(buf, { type: 'buffer' })
   // Heuristic: take first sheet
   const sheet = wb.Sheets[wb.SheetNames[0]]
@@ -118,6 +134,8 @@ async function extractFromExcelBuffer(buf) {
   const taxKey = pick(['tax','gst','cgst','sgst','igst','vat'])
   const totalKey = pick(['grand total','invoice total','total amount','total','amount'])
   const dateKey = pick(['invoice date','bill date','date','dt'])
+
+  if (debugLog) debugLog.push({ step: 'excel-headers', header, picks: { serialKey, custKey, phoneKey, productKey, qtyKey, priceKey, taxKey, totalKey, dateKey }, rows: rows.length })
 
   const products = []
   const customers = []
@@ -161,7 +179,7 @@ async function extractFromExcelBuffer(buf) {
   return { products, customers, invoices }
 }
 
-async function extractWithGemini(file) {
+async function extractWithGemini(file, debugLog) {
   const mimeType = file.mimetype
   // GoogleAIFileManager.uploadFile expects a file path on Node.
   // Write the buffer to a temp file, upload, then clean up.
@@ -263,21 +281,26 @@ async function extractWithGemini(file) {
         { text: prompt },
         { fileData: { fileUri: upload.file.uri, mimeType } }
       ])
+      if (debugLog) debugLog.push({ step: 'gemini-generate', model: m, uri: upload.file.uri })
       break
     } catch (e) {
       lastErr = e
       // Try next model id on 404/not found
       const msg = String(e?.message || '')
       if (!/not found|404/i.test(msg)) {
+        if (debugLog) debugLog.push({ step: 'gemini-error', model: m, error: msg })
         break
       }
+      if (debugLog) debugLog.push({ step: 'gemini-next-model', model: m, error: msg })
     }
   }
   if (!result) {
     console.error('[Gemini generateContent failed]', lastErr)
+    if (debugLog) debugLog.push({ step: 'gemini-failed', error: String(lastErr?.message||'') })
     return { products: [], customers: [], invoices: [] }
   }
   const text = await result.response.text()
+  if (debugLog) debugLog.push({ step: 'gemini-response', length: text?.length || 0, preview: String(text).slice(0, 1000) })
   try {
     // Try direct JSON (preferred when responseMimeType=application/json)
     return JSON.parse(text)
@@ -299,7 +322,7 @@ async function extractWithGemini(file) {
   return { products: [], customers: [], invoices: [] }
 }
 
-async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv') {
+async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debugLog) {
   const prompt = `${systemSchema}\nThe following text is a CSV export of an invoice spreadsheet.\n- Infer headers (e.g., item/description, qty, rate/price, gst/cgst/sgst/igst, customer/party, invoice no, date, total).\n- Parse rows into products, customers, and invoices as per the schema.\nCSV Content (begin):\n\n${csvText}\n\nCSV Content (end).\nReturn only valid JSON conforming to the schema.`
 
   const candidates = Array.from(new Set([
@@ -339,18 +362,22 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv') {
       result = await model.generateContent([
         { text: prompt }
       ])
+      if (debugLog) debugLog.push({ step: 'gemini-csv-generate', model: m, chars: csvText.length })
       break
     } catch (e) {
       lastErr = e
       const msg = String(e?.message || '')
+      if (debugLog) debugLog.push({ step: 'gemini-csv-error', model: m, error: msg })
       if (!/not found|404/i.test(msg)) break
     }
   }
   if (!result) {
     console.error('[Gemini generateContent from CSV failed]', lastErr)
+    if (debugLog) debugLog.push({ step: 'gemini-csv-failed', error: String(lastErr?.message||'') })
     return { products: [], customers: [], invoices: [] }
   }
   const text = await result.response.text()
+  if (debugLog) debugLog.push({ step: 'gemini-csv-response', length: text?.length || 0, preview: String(text).slice(0, 1000) })
   try { return JSON.parse(text) } catch {}
   try {
     const m = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
