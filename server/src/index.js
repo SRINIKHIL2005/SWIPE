@@ -14,6 +14,17 @@ app.use(express.json())
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } })
 
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Swipe Invoice AI Backend',
+    ok: true,
+    routes: {
+      health: '/health',
+      extract: { method: 'POST', path: '/api/extract', formField: 'files' }
+    }
+  })
+})
+
 app.get('/health', (req, res) => {
   res.json({ ok: true })
 })
