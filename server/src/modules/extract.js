@@ -6,7 +6,7 @@ import os from 'os'
 import path from 'path'
 
 const API_KEY = process.env.GOOGLE_API_KEY
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro'
+const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 
 const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null
 const fileMgr = API_KEY ? new GoogleAIFileManager(API_KEY) : null
@@ -106,12 +106,38 @@ async function extractWithGemini(file) {
   })
   // Best-effort cleanup
   try { await fs.unlink(tmpPath) } catch {}
-  const model = genAI.getGenerativeModel({ model: MODEL })
   const prompt = `${systemSchema}\nAnalyze the attached file and extract fields.`
-  const result = await model.generateContent([
-    { text: prompt },
-    { fileData: { fileUri: upload.file.uri, mimeType } }
-  ])
+
+  const candidates = Array.from(new Set([
+    MODEL,
+    'gemini-1.5-pro-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+  ])).filter(Boolean)
+
+  let result
+  let lastErr
+  for (const m of candidates) {
+    try {
+      const model = genAI.getGenerativeModel({ model: m })
+      result = await model.generateContent([
+        { text: prompt },
+        { fileData: { fileUri: upload.file.uri, mimeType } }
+      ])
+      break
+    } catch (e) {
+      lastErr = e
+      // Try next model id on 404/not found
+      const msg = String(e?.message || '')
+      if (!/not found|404/i.test(msg)) {
+        break
+      }
+    }
+  }
+  if (!result) {
+    console.error('[Gemini generateContent failed]', lastErr)
+    return { products: [], customers: [], invoices: [] }
+  }
   const text = await result.response.text()
   try {
     const jsonStart = text.indexOf('{')
