@@ -272,20 +272,48 @@ async function extractFromPdfBuffer(buf, debugLog) {
       }
     }
 
-    // Date
+    // Date (with validation to avoid address-like tokens)
     let date = ''
-    for (const l of lines) {
-      let m = l.match(/date\s*[:\-]?\s*([0-9]{1,2}[\/.\-][0-9]{1,2}[\/.\-][0-9]{2,4})/i)
-      if (!m) m = l.match(/date\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i)
-      if (!m) m = l.match(/date\s*[:\-]?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})/i)
-      if (m && m[1]) { date = m[1]; break }
+    const parseDate = (s) => {
+      const t = s.trim()
+      // yyyy-mm-dd
+      let m = t.match(/^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})$/)
+      if (m) {
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3])
+        if (y >= 1900 && y <= 2100 && mo >=1 && mo <=12 && d>=1 && d<=31) return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+      }
+      // dd-mm-yyyy or dd/mm/yy(yy)
+      m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/)
+      if (m) {
+        const d = Number(m[1]), mo = Number(m[2]); let y = Number(m[3])
+        if (y < 100) y += 2000
+        if (y >= 1900 && y <= 2100 && mo >=1 && mo <=12 && d>=1 && d<=31) return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+      }
+      // Month name dd, yyyy
+      m = t.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})$/)
+      if (m) return t
+      return ''
     }
-    if (!date) {
-      // Generic date token search anywhere
+    const tryExtractLabeledDate = () => {
       for (const l of lines) {
-        let m = l.match(/\b(\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4})\b/)
-        if (!m) m = l.match(/\b(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})\b/)
-        if (m && m[1]) { date = m[1]; break }
+        let m = l.match(/date\s*[:\-]?\s*(.+)$/i)
+        if (m && m[1]) {
+          const cand = parseDate(m[1])
+          if (cand) return cand
+        }
+      }
+      return ''
+    }
+    date = tryExtractLabeledDate()
+    if (!date) {
+      // Look near top 20 lines where dates usually appear
+      for (const l of lines.slice(0, 20)) {
+        const tokens = l.split(/\s+/)
+        for (const tok of tokens) {
+          const cand = parseDate(tok)
+          if (cand) { date = cand; break }
+        }
+        if (date) break
       }
     }
 
@@ -366,6 +394,30 @@ async function extractFromPdfBuffer(buf, debugLog) {
     if (debugLog) debugLog.push({ step: 'pdf-parse-error', error: String(e?.message||'') })
     return { products: [], customers: [], invoices: [] }
   }
+}
+
+// Simple AI echo to verify key and endpoint
+export async function aiEcho(prompt = 'Say ok', debug=false) {
+  if (!API_KEY) return { ok: false, error: 'NO_API_KEY' }
+  const candidates = Array.from(new Set([
+    MODEL,
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro'
+  ])).filter(Boolean)
+  let lastErr
+  for (const m of candidates) {
+    try {
+      const dbg = []
+      const json = await httpGenerateContent(m, [ { text: prompt } ], { temperature: 0 }, dbg)
+      const apiVersionUsed = (dbg.find(s => s.step==='http-generate-ok')||{}).apiVersionUsed || API_VERSION
+      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(json)
+      return { ok: true, modelUsed: m, apiVersionUsed, text }
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  return { ok: false, error: String(lastErr?.message||'UNKNOWN') }
 }
 
 async function extractWithGemini(file, debugLog) {

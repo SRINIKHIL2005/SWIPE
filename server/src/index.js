@@ -3,7 +3,7 @@ import cors from 'cors'
 import multer from 'multer'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { extractFromFiles, checkAIConnectivity } from './modules/extract.js'
+import { extractFromFiles, checkAIConnectivity, aiEcho } from './modules/extract.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -58,6 +58,20 @@ app.post('/api/extract', upload.array('files'), async (req, res) => {
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e?.message || 'Extraction failed' })
+  }
+})
+
+// Simple AI key verification endpoint
+app.get('/ai/echo', async (req, res) => {
+  try {
+    const prompt = String(req.query.prompt || 'Say ok only')
+    const r = await aiEcho(prompt, true)
+    const key = process.env.GOOGLE_API_KEY || ''
+    const looksLikeAIStudio = key.startsWith('AIza')
+    const keyShape = { present: !!key, looksLikeAIStudio, length: key.length }
+    res.json({ ok: r.ok, model: r.modelUsed, apiVersionUsed: r.apiVersionUsed, text: r.text, error: r.error, keyShape })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message||'UNKNOWN') })
   }
 })
 
