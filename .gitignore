@@ -1,0 +1,10 @@
+# Node
+node_modules/
+*.log
+
+# Vite
+client/dist/
+client/.vite/
+
+# Env
+**/.env
