@@ -235,18 +235,26 @@ async function extractFromPdfBuffer(buf, debugLog) {
     // Basic field extraction heuristics
     const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean)
 
-    // Customer block: look for common labels: Bill To / Billed To / Customer / Customer Name / Buyer / Party / Client
+    // Customer block: look for common labels: Bill To / Billed To / Customer / Customer Name / Buyer / Party / Client / Consignee / Ship To / Sold To / Recipient
     let customerName = ''
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i]
-      if (/^(bill\s*to|billed\s*to|customer(?:\s*name)?|buyer|party|client)[:\s]/i.test(l)) {
+      if (/^(bill\s*to|billed\s*to|customer(?:\s*name)?|buyer|party|client|consignee|ship\s*to|sold\s*to|recipient)[:\s]/i.test(l)) {
         // Take current line (after colon) or next non-empty line(s)
         const after = l.split(/:\s*/i)[1]
         if (after && after.trim()) { customerName = after.trim() }
         else {
           // Prefer only the first following non-empty line as name
-          const cand1 = (lines[i+1] || '').trim()
-          if (cand1) customerName = cand1
+          // Skip obvious meta labels like GSTIN/Phone/Email
+          let lookAhead = 1
+          while (lookAhead <= 3) {
+            const cand1 = (lines[i+lookAhead] || '').trim()
+            if (cand1 && !/^(gstin|gst\s*in|phone|ph\:|email|place\s*of\s*supply)/i.test(cand1)) {
+              customerName = cand1
+              break
+            }
+            lookAhead++
+          }
         }
         break
       }
