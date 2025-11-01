@@ -197,9 +197,19 @@ async function extractWithGemini(file, debugLog) {
 
   const candidates = Array.from(new Set([
     MODEL,
-    'gemini-1.5-pro-latest',
+    // Current/recent IDs
+    'gemini-1.5-pro',
+    'gemini-1.5-pro-001',
+    'gemini-1.5-pro-002',
     'gemini-1.5-flash',
+    'gemini-1.5-flash-001',
+    'gemini-1.5-flash-002',
+    'gemini-1.5-pro-latest',
     'gemini-1.5-flash-latest',
+    // Legacy vision-capable models (v1beta friendly)
+    'gemini-pro-vision',
+    'gemini-1.0-pro-vision',
+    'gemini-1.0-pro-vision-latest',
   ])).filter(Boolean)
 
   // Strongly-typed JSON schema enforcement (Gemini structured response)
@@ -339,9 +349,17 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
 
   const candidates = Array.from(new Set([
     MODEL,
-    'gemini-1.5-pro-latest',
+    'gemini-1.5-pro',
+    'gemini-1.5-pro-001',
+    'gemini-1.5-pro-002',
     'gemini-1.5-flash',
+    'gemini-1.5-flash-001',
+    'gemini-1.5-flash-002',
+    'gemini-1.5-pro-latest',
     'gemini-1.5-flash-latest',
+    'gemini-pro-vision',
+    'gemini-1.0-pro-vision',
+    'gemini-1.0-pro-vision-latest',
   ])).filter(Boolean)
 
   const responseSchema = {
