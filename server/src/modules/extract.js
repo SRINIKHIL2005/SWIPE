@@ -106,7 +106,7 @@ async function extractWithGemini(file) {
   })
   // Best-effort cleanup
   try { await fs.unlink(tmpPath) } catch {}
-  const prompt = `${systemSchema}\nAnalyze the attached file and extract fields.`
+  const prompt = `${systemSchema}\nAnalyze the attached file and extract fields. Return only valid JSON as specified.`
 
   const candidates = Array.from(new Set([
     MODEL,
@@ -119,7 +119,10 @@ async function extractWithGemini(file) {
   let lastErr
   for (const m of candidates) {
     try {
-      const model = genAI.getGenerativeModel({ model: m })
+      const model = genAI.getGenerativeModel({
+        model: m,
+        generationConfig: { responseMimeType: 'application/json' }
+      })
       result = await model.generateContent([
         { text: prompt },
         { fileData: { fileUri: upload.file.uri, mimeType } }
@@ -140,13 +143,24 @@ async function extractWithGemini(file) {
   }
   const text = await result.response.text()
   try {
+    // Try direct JSON (preferred when responseMimeType=application/json)
+    return JSON.parse(text)
+  } catch {}
+  try {
+    // Fallback: strip markdown code fences if present
+    const fence = /```(?:json)?\s*([\s\S]*?)```/i
+    const m = text.match(fence)
+    if (m && m[1]) return JSON.parse(m[1])
+  } catch {}
+  try {
+    // Last resort: best-effort slice between first { and last }
     const jsonStart = text.indexOf('{')
     const jsonEnd = text.lastIndexOf('}') + 1
-    const json = JSON.parse(text.slice(jsonStart, jsonEnd))
-    return json
-  } catch(e) {
-    return { products: [], customers: [], invoices: [] }
-  }
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      return JSON.parse(text.slice(jsonStart, jsonEnd))
+    }
+  } catch {}
+  return { products: [], customers: [], invoices: [] }
 }
 
 function normalize(raw) {

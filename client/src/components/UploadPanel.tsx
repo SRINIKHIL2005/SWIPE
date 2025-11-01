@@ -25,11 +25,20 @@ export default function UploadPanel() {
         headers: { 'Content-Type': 'multipart/form-data' }
       })
       const data = res.data
-      if (data?.products?.length) dispatch(upsertProducts(data.products))
-      if (data?.customers?.length) dispatch(upsertCustomers(data.customers))
-      if (data?.invoices?.length) dispatch(upsertInvoices(data.invoices))
-      setStatus('success')
-      setMessage(`Processed ${Array.from(files).length} file(s).`)
+      const p = Array.isArray(data?.products) ? data.products : []
+      const c = Array.isArray(data?.customers) ? data.customers : []
+      const i = Array.isArray(data?.invoices) ? data.invoices : []
+      if (p.length) dispatch(upsertProducts(p))
+      if (c.length) dispatch(upsertCustomers(c))
+      if (i.length) dispatch(upsertInvoices(i))
+      const summary = `Extracted ${i.length} invoice(s), ${p.length} product(s), ${c.length} customer(s).`
+      if (p.length + c.length + i.length === 0) {
+        setStatus('error')
+        setMessage(`No structured data extracted. Please check file clarity/format. ${summary}`)
+      } else {
+        setStatus('success')
+        setMessage(summary)
+      }
     } catch (e: any) {
       setStatus('error')
       setMessage(e?.response?.data?.error || e.message || 'Extraction failed')
