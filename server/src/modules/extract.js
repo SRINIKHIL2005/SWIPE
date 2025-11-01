@@ -12,11 +12,43 @@ const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null
 const fileMgr = API_KEY ? new GoogleAIFileManager(API_KEY) : null
 
 const systemSchema = `
-Return strictly this JSON structure with keys products, customers, invoices.
-- products: array of { name, unitPrice (number), taxRate (0-1 number), priceWithTax (number), quantity (number, if known), discount (number, optional) }
-- customers: array of { name, phone (string, optional), totalPurchase (number if computable, else 0) }
-- invoices: array of { serialNumber, customerName, date (YYYY-MM-DD or original), items: [ { productName, qty (number), unitPrice (number), taxRate (0-1) } ], tax (number, total tax), totalAmount (number) }
-If a value is missing, leave it empty string or 0. Do not invent data.
+You are an information extraction engine. Extract ONLY structured fields and return JSON that matches EXACTLY this schema. Do not include any explanations or markdown.
+{
+  "products": [
+    {
+      "name": "string",
+      "unitPrice": 0,
+      "taxRate": 0,
+      "priceWithTax": 0,
+      "quantity": 0,
+      "discount": 0
+    }
+  ],
+  "customers": [
+    {
+      "name": "string",
+      "phone": "string",
+      "totalPurchase": 0
+    }
+  ],
+  "invoices": [
+    {
+      "serialNumber": "string",
+      "customerName": "string",
+      "date": "string",
+      "items": [
+        { "productName": "string", "qty": 0, "unitPrice": 0, "taxRate": 0 }
+      ],
+      "tax": 0,
+      "totalAmount": 0
+    }
+  ]
+}
+Rules:
+- Use 0 or empty string when a value is missing; never invent plausible values.
+- taxRate is a fraction (e.g., 0.18 for 18%).
+- priceWithTax = unitPrice * (1 + taxRate) if not explicitly present.
+- Return ONLY JSON. No additional text.
 `
 
 export async function extractFromFiles(files) {
@@ -24,7 +56,16 @@ export async function extractFromFiles(files) {
   for (const f of files) {
     const ext = (f.originalname.split('.').pop() || '').toLowerCase()
     if (['xls','xlsx','csv'].includes(ext)) {
-      const fromX = await extractFromExcelBuffer(f.buffer)
+      let fromX = await extractFromExcelBuffer(f.buffer)
+      // If Excel heuristic yielded nothing and AI is available, try AI pass as fallback
+      if (API_KEY && (!fromX.products?.length && !fromX.customers?.length && !fromX.invoices?.length)) {
+        const aiFallback = await extractWithGemini({
+          buffer: f.buffer,
+          originalname: f.originalname,
+          mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        })
+        fromX = aiFallback
+      }
       merge(merged, fromX)
     } else if (API_KEY) {
       const fromAI = await extractWithGemini(f)
