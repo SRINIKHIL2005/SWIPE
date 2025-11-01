@@ -1,6 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { GoogleAIFileManager } from '@google/generative-ai/server'
 import xlsx from 'xlsx'
+import fs from 'fs/promises'
+import os from 'os'
+import path from 'path'
 
 const API_KEY = process.env.GOOGLE_API_KEY
 const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro'
@@ -91,11 +94,18 @@ async function extractFromExcelBuffer(buf) {
 
 async function extractWithGemini(file) {
   const mimeType = file.mimetype
-  const upload = await fileMgr.uploadFile({
-    file: file.buffer,
+  // GoogleAIFileManager.uploadFile expects a file path on Node.
+  // Write the buffer to a temp file, upload, then clean up.
+  const tmpDir = os.tmpdir()
+  const ext = (file.originalname.split('.').pop() || 'bin').toLowerCase()
+  const tmpPath = path.join(tmpDir, `upload_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`)
+  await fs.writeFile(tmpPath, file.buffer)
+  const upload = await fileMgr.uploadFile(tmpPath, {
+    mimeType,
     displayName: file.originalname,
-    mimeType
   })
+  // Best-effort cleanup
+  try { await fs.unlink(tmpPath) } catch {}
   const model = genAI.getGenerativeModel({ model: MODEL })
   const prompt = `${systemSchema}\nAnalyze the attached file and extract fields.`
   const result = await model.generateContent([
