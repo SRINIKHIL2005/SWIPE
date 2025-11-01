@@ -243,9 +243,9 @@ async function extractFromPdfBuffer(buf, debugLog) {
         const after = l.split(/:\s*/i)[1]
         if (after && after.trim()) { customerName = after.trim() }
         else {
-          // Concatenate up to 2 following lines as name block
-          const cand = [lines[i+1], lines[i+2]].filter(Boolean).join(' ').trim()
-          if (cand) customerName = cand
+          // Prefer only the first following non-empty line as name
+          const cand1 = (lines[i+1] || '').trim()
+          if (cand1) customerName = cand1
         }
         break
       }
@@ -258,11 +258,18 @@ async function extractFromPdfBuffer(buf, debugLog) {
       }
     }
 
-    // Invoice number
+    // Invoice number: require digits in the captured segment to avoid grabbing the tail of the word "INVOICE"
     let serialNumber = ''
-    for (const l of lines) {
-      const m = l.match(/(?:invoice|inv|bill)\s*(?:no\.?|number)?\s*[:#-]?\s*([A-Za-z0-9\-\/]+)/i)
-      if (m && m[1]) { serialNumber = m[1]; break }
+    for (let idx = 0; idx < lines.length; idx++) {
+      const l = lines[idx]
+      const m = l.match(/(?:invoice|inv|bill)\s*(?:no\.?|#|number)?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\-\/# ]{1,})/i)
+      if (m && m[1] && /[0-9]/.test(m[1])) { serialNumber = m[1].trim(); break }
+      // If the next line looks like an ID token with digits, accept it
+      const nxt = (lines[idx+1]||'').trim()
+      if (!serialNumber && /(?:invoice|inv|bill)\b/i.test(l) && /^[A-Za-z0-9][A-Za-z0-9\-\/#]{2,}$/.test(nxt) && /[0-9]/.test(nxt)) {
+        serialNumber = nxt
+        break
+      }
     }
 
     // Date
@@ -270,7 +277,16 @@ async function extractFromPdfBuffer(buf, debugLog) {
     for (const l of lines) {
       let m = l.match(/date\s*[:\-]?\s*([0-9]{1,2}[\/.\-][0-9]{1,2}[\/.\-][0-9]{2,4})/i)
       if (!m) m = l.match(/date\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i)
+      if (!m) m = l.match(/date\s*[:\-]?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})/i)
       if (m && m[1]) { date = m[1]; break }
+    }
+    if (!date) {
+      // Generic date token search anywhere
+      for (const l of lines) {
+        let m = l.match(/\b(\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4})\b/)
+        if (!m) m = l.match(/\b(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})\b/)
+        if (m && m[1]) { date = m[1]; break }
+      }
     }
 
     // Grand total (look for many synonyms)
@@ -321,6 +337,18 @@ async function extractFromPdfBuffer(buf, debugLog) {
         }
         // Stop if we hit another section
         if (/^(subtotal|tax|total|amount\s*due|balance\s*due|net\s*amount)/i.test(l)) break
+      }
+    }
+    // Fallback items scan if none detected yet: look for lines with name then qty then price (2-3 numbers)
+    if (items.length === 0) {
+      for (const l of lines) {
+        const m = l.match(/^(.+?)\s+(\d{1,4})\s+([₹$]?[0-9,]+(?:\.[0-9]{1,2})?)(?:\s+([₹$]?[0-9,]+(?:\.[0-9]{1,2})?))?$/)
+        if (m) {
+          const name = m[1].trim()
+          const qty = Number(m[2]) || 0
+          const unitPrice = Number((m[3]||'').replace(/[^0-9.]/g, '')) || 0
+          if (name && qty && unitPrice) items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+        }
       }
     }
 
