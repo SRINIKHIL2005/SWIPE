@@ -3,6 +3,7 @@ import xlsx from 'xlsx'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import pdfParse from 'pdf-parse'
 
 const API_KEY = process.env.GOOGLE_API_KEY
 const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
@@ -108,6 +109,15 @@ export async function extractFromFiles(files, { debug=false } = {}) {
         }
       }
       merge(merged, fromX)
+    } else if (ext === 'pdf') {
+      // Try local PDF text fallback first (no AI), then AI if available
+      let fromPdf = await extractFromPdfBuffer(f.buffer, debug ? debugLog : undefined)
+      if (API_KEY && (!fromPdf.products?.length && !fromPdf.customers?.length && !fromPdf.invoices?.length)) {
+        if (debug) debugLog.push({ step: 'pdf-ai-fallback', note: 'Local PDF parse yielded little; trying Gemini' })
+        const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
+        fromPdf = fromAI
+      }
+      merge(merged, fromPdf)
     } else if (API_KEY) {
       if (debug) debugLog.push({ step: 'non-excel-file', note: 'Use Gemini', name: f.originalname })
       const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
@@ -201,6 +211,105 @@ async function extractFromExcelBuffer(buf, debugLog) {
 
   // If still nothing, return empty
   return { products, customers, invoices }
+}
+
+async function extractFromPdfBuffer(buf, debugLog) {
+  try {
+    const data = await pdfParse(buf)
+    const text = (data.text || '').replace(/\r/g, '')
+    if (debugLog) debugLog.push({ step: 'pdf-text', chars: text.length, pages: data.numpages })
+
+    if (!text || text.trim().length === 0) return { products: [], customers: [], invoices: [] }
+
+    // Basic field extraction heuristics
+    const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean)
+
+    // Customer block: look for "Bill To" or "Customer"
+    let customerName = ''
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]
+      if (/^(bill\s*to|billed\s*to|customer)[:\s]/i.test(l)) {
+        // Take current line (after colon) or next non-empty line(s)
+        const after = l.split(/:\s*/i)[1]
+        if (after && after.trim()) { customerName = after.trim() }
+        else {
+          // Concatenate up to 2 following lines as name block
+          const cand = [lines[i+1], lines[i+2]].filter(Boolean).join(' ').trim()
+          if (cand) customerName = cand
+        }
+        break
+      }
+    }
+
+    // Invoice number
+    let serialNumber = ''
+    for (const l of lines) {
+      const m = l.match(/(?:invoice|inv|bill)\s*(?:no\.?|number)?\s*[:#-]?\s*([A-Za-z0-9\-\/]+)/i)
+      if (m && m[1]) { serialNumber = m[1]; break }
+    }
+
+    // Date
+    let date = ''
+    for (const l of lines) {
+      let m = l.match(/date\s*[:\-]?\s*([0-9]{1,2}[\/.\-][0-9]{1,2}[\/.\-][0-9]{2,4})/i)
+      if (!m) m = l.match(/date\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i)
+      if (m && m[1]) { date = m[1]; break }
+    }
+
+    // Grand total
+    let totalAmount = 0
+    for (const l of lines.slice(-20)) { // search near the end
+      const m = l.match(/(grand\s*total|invoice\s*total|total\s*amount|total)\s*[:\-]?\s*([₹$]?\s*[0-9,]+(?:\.[0-9]{1,2})?)/i)
+      if (m && m[2]) {
+        totalAmount = Number(m[2].replace(/[^0-9.]/g, '')) || 0
+        break
+      }
+    }
+
+    // Try to locate items table
+    // Detect header row
+    const headerIdx = lines.findIndex(l => /(description|item|product)/i.test(l) && /(qty|quantity)/i.test(l) && /(rate|price|unit|amount)/i.test(l))
+    const items = []
+    if (headerIdx >= 0) {
+      for (let i = headerIdx + 1; i < lines.length; i++) {
+        const l = lines[i]
+        // Split by multiple spaces or tabs
+        const parts = l.split(/\s{2,}|\t+/).map(s => s.trim()).filter(Boolean)
+        if (parts.length < 3) continue
+        // Heuristic mapping: last is amount or unit price, one of the earlier is qty
+        let qty = 0, unitPrice = 0, name = ''
+        // Find a numeric token as qty
+        for (let j = 1; j < parts.length; j++) {
+          const num = Number(parts[j].replace(/[^0-9.]/g, ''))
+          if (!Number.isNaN(num) && num > 0) { qty = num; break }
+        }
+        // Unit price likely in the last 1-2 tokens
+        const tailNums = parts.slice(-2).map(t => Number(t.replace(/[^0-9.]/g, ''))).filter(n => !Number.isNaN(n))
+        if (tailNums.length) unitPrice = tailNums[0]
+        // Name is first token(s)
+        name = parts[0]
+        if (name && (qty || unitPrice)) {
+          items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+        }
+        // Stop if we hit another section
+        if (/^(subtotal|tax|total)/i.test(l)) break
+      }
+    }
+
+    const products = items.map(it => ({ name: it.productName, unitPrice: it.unitPrice, taxRate: it.taxRate, priceWithTax: it.unitPrice * (1 + it.taxRate), quantity: it.qty }))
+    const customers = customerName ? [{ name: customerName, phone: '', totalPurchase: totalAmount }] : []
+    const invoices = [{ serialNumber, customerName, date, items, tax: 0, totalAmount }]
+
+    if (debugLog) debugLog.push({ step: 'pdf-extracted', items: items.length, customerName: !!customerName, serialNumber: !!serialNumber, totalAmount })
+
+    // If nothing meaningful, return empty
+    const hasData = products.length || customers.length || (items.length || totalAmount)
+    if (!hasData) return { products: [], customers: [], invoices: [] }
+    return { products, customers, invoices }
+  } catch (e) {
+    if (debugLog) debugLog.push({ step: 'pdf-parse-error', error: String(e?.message||'') })
+    return { products: [], customers: [], invoices: [] }
+  }
 }
 
 async function extractWithGemini(file, debugLog) {
