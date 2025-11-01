@@ -205,13 +205,11 @@ async function extractWithGemini(file, debugLog) {
   // Strongly-typed JSON schema enforcement (Gemini structured response)
   const responseSchema = {
     type: 'object',
-    additionalProperties: false,
     properties: {
       products: {
         type: 'array',
         items: {
           type: 'object',
-          additionalProperties: false,
           properties: {
             name: { type: 'string' },
             unitPrice: { type: 'number' },
@@ -227,7 +225,6 @@ async function extractWithGemini(file, debugLog) {
         type: 'array',
         items: {
           type: 'object',
-          additionalProperties: false,
           properties: {
             name: { type: 'string' },
             phone: { type: 'string' },
@@ -240,7 +237,6 @@ async function extractWithGemini(file, debugLog) {
         type: 'array',
         items: {
           type: 'object',
-          additionalProperties: false,
           properties: {
             serialNumber: { type: 'string' },
             customerName: { type: 'string' },
@@ -249,7 +245,6 @@ async function extractWithGemini(file, debugLog) {
               type: 'array',
               items: {
                 type: 'object',
-                additionalProperties: false,
                 properties: {
                   productName: { type: 'string' },
                   qty: { type: 'number' },
@@ -287,6 +282,23 @@ async function extractWithGemini(file, debugLog) {
       lastErr = e
       // Try next model id on 404/not found
       const msg = String(e?.message || '')
+      // If schema isn't supported by this API version, retry without schema
+      if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
+        try {
+          const modelNoSchema = genAI.getGenerativeModel({
+            model: m,
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+          })
+          result = await modelNoSchema.generateContent([
+            { text: prompt },
+            { fileData: { fileUri: upload.file.uri, mimeType } }
+          ])
+          if (debugLog) debugLog.push({ step: 'gemini-generate-noschema', model: m })
+          break
+        } catch (e2) {
+          lastErr = e2
+        }
+      }
       if (!/not found|404/i.test(msg)) {
         if (debugLog) debugLog.push({ step: 'gemini-error', model: m, error: msg })
         break
@@ -334,17 +346,16 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
 
   const responseSchema = {
     type: 'object',
-    additionalProperties: false,
     properties: {
-      products: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+      products: { type: 'array', items: { type: 'object', properties: {
         name: { type: 'string' }, unitPrice: { type: 'number' }, taxRate: { type: 'number' }, priceWithTax: { type: 'number' }, quantity: { type: 'number' }, discount: { type: 'number' }
       }, required: ['name','unitPrice','taxRate','priceWithTax'] } },
-      customers: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+      customers: { type: 'array', items: { type: 'object', properties: {
         name: { type: 'string' }, phone: { type: 'string' }, totalPurchase: { type: 'number' }
       }, required: ['name'] } },
-      invoices: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+      invoices: { type: 'array', items: { type: 'object', properties: {
         serialNumber: { type: 'string' }, customerName: { type: 'string' }, date: { type: 'string' },
-        items: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { productName: { type: 'string' }, qty: { type: 'number' }, unitPrice: { type: 'number' }, taxRate: { type: 'number' } }, required: ['productName','qty','unitPrice','taxRate'] } },
+        items: { type: 'array', items: { type: 'object', properties: { productName: { type: 'string' }, qty: { type: 'number' }, unitPrice: { type: 'number' }, taxRate: { type: 'number' } }, required: ['productName','qty','unitPrice','taxRate'] } },
         tax: { type: 'number' }, totalAmount: { type: 'number' }
       }, required: ['customerName','items'] } }
     },
@@ -368,6 +379,21 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
       lastErr = e
       const msg = String(e?.message || '')
       if (debugLog) debugLog.push({ step: 'gemini-csv-error', model: m, error: msg })
+      if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
+        try {
+          const modelNoSchema = genAI.getGenerativeModel({
+            model: m,
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+          })
+          result = await modelNoSchema.generateContent([
+            { text: prompt }
+          ])
+          if (debugLog) debugLog.push({ step: 'gemini-csv-generate-noschema', model: m })
+          break
+        } catch (e2) {
+          lastErr = e2
+        }
+      }
       if (!/not found|404/i.test(msg)) break
     }
   }
