@@ -7,12 +7,31 @@ import path from 'path'
 const API_KEY = process.env.GOOGLE_API_KEY
 const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 const API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
+const BASE_URL = `https://generativelanguage.googleapis.com/${API_VERSION}`
 
-let genAI = API_KEY ? new GoogleGenerativeAI({ apiKey: API_KEY, apiVersion: API_VERSION }) : null
+let genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null
 
 function setApiVersion(version) {
   if (!API_KEY) return
-  genAI = new GoogleGenerativeAI({ apiKey: API_KEY, apiVersion: version })
+  // SDK doesn't allow switching easily; our manual HTTP client below uses BASE_URL
+}
+
+async function httpGenerateContent(model, parts, generationConfig = {}, debugLog) {
+  const url = `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(API_KEY||'')}`
+  const body = { contents: [{ role: 'user', parts }], generationConfig }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    if (debugLog) debugLog.push({ step: 'http-generate-error', status: res.status, url, responsePreview: text.slice(0, 400) })
+    throw new Error(`HTTP ${res.status}: ${text}`)
+  }
+  const json = await res.json()
+  if (debugLog) debugLog.push({ step: 'http-generate-ok', model })
+  return json
 }
 
 const systemSchema = `
@@ -270,47 +289,18 @@ async function extractWithGemini(file, debugLog) {
   let lastErr
   for (const m of candidates) {
     try {
-      const model = genAI.getGenerativeModel({
-        model: m,
-        generationConfig: { responseMimeType: 'application/json', responseSchema, temperature: 0.2 }
-      })
       const b64 = Buffer.from(file.buffer).toString('base64')
-      result = await model.generateContent([
-        { text: prompt },
-        { inlineData: { data: b64, mimeType } }
-      ])
-      if (debugLog) debugLog.push({ step: 'gemini-generate-inline', model: m, bytes: file.buffer?.length||0 })
+      const json = await httpGenerateContent(m, [ { text: prompt }, { inlineData: { data: b64, mimeType } } ], { temperature: 0.2 }, debugLog)
+      result = { response: { text: async () => (json.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(json)) } }
+      if (debugLog) debugLog.push({ step: 'http-generate-used', model: m })
       break
     } catch (e) {
       lastErr = e
-      // Try next model id on 404/not found
       const msg = String(e?.message || '')
-      if (/v1beta/i.test(msg)) {
-        // Switch client to v1 if backend complains about v1beta
-        setApiVersion('v1')
-      }
-      // If schema isn't supported by this API version, retry without schema
-      if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
-        try {
-          const modelNoSchema = genAI.getGenerativeModel({
-            model: m,
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-          })
-          result = await modelNoSchema.generateContent([
-            { text: prompt },
-            { fileData: { fileUri: upload.file.uri, mimeType } }
-          ])
-          if (debugLog) debugLog.push({ step: 'gemini-generate-noschema', model: m })
-          break
-        } catch (e2) {
-          lastErr = e2
-        }
-      }
+      if (debugLog) debugLog.push({ step: 'http-generate-failed', model: m, error: msg })
       if (!/not found|404/i.test(msg)) {
-        if (debugLog) debugLog.push({ step: 'gemini-error', model: m, error: msg })
         break
       }
-      if (debugLog) debugLog.push({ step: 'gemini-next-model', model: m, error: msg })
     }
   }
   if (!result) {
@@ -381,37 +371,14 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
   let lastErr
   for (const m of candidates) {
     try {
-      const model = genAI.getGenerativeModel({
-        model: m,
-        generationConfig: { responseMimeType: 'application/json', responseSchema, temperature: 0.2 }
-      })
-      result = await model.generateContent([
-        { text: prompt }
-      ])
-      if (debugLog) debugLog.push({ step: 'gemini-csv-generate', model: m, chars: csvText.length })
+      const json = await httpGenerateContent(m, [ { text: prompt } ], { temperature: 0.2 }, debugLog)
+      result = { response: { text: async () => (json.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(json)) } }
+      if (debugLog) debugLog.push({ step: 'http-csv-generate', model: m, chars: csvText.length })
       break
     } catch (e) {
       lastErr = e
       const msg = String(e?.message || '')
-      if (debugLog) debugLog.push({ step: 'gemini-csv-error', model: m, error: msg })
-      if (/v1beta/i.test(msg)) {
-        setApiVersion('v1')
-      }
-      if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
-        try {
-          const modelNoSchema = genAI.getGenerativeModel({
-            model: m,
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-          })
-          result = await modelNoSchema.generateContent([
-            { text: prompt }
-          ])
-          if (debugLog) debugLog.push({ step: 'gemini-csv-generate-noschema', model: m })
-          break
-        } catch (e2) {
-          lastErr = e2
-        }
-      }
+      if (debugLog) debugLog.push({ step: 'http-csv-error', model: m, error: msg })
       if (!/not found|404/i.test(msg)) break
     }
   }
@@ -511,28 +478,15 @@ function normalize(raw) {
 
 // Lightweight AI connectivity check used by /health?deep=1
 export async function checkAIConnectivity() {
-  if (!API_KEY || !genAI) return { ok: false, error: 'NO_API_KEY' }
-  const candidates = [
-    MODEL,
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-pro',
-  ].filter(Boolean)
+  if (!API_KEY) return { ok: false, error: 'NO_API_KEY' }
+  const candidates = [ MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro' ].filter(Boolean)
   let lastErr
   for (const m of candidates) {
     try {
-      const model = genAI.getGenerativeModel({ model: m, generationConfig: { temperature: 0, responseMimeType: 'application/json' } })
-      // Tiny prompt to avoid costs; expect trivial JSON
-      const resp = await model.generateContent([{ text: '{"ping":"ok"}' }])
-      if (resp && resp.response) return { ok: true, model: m }
+      const json = await httpGenerateContent(m, [ { text: '{"ping":"ok"}' } ], { temperature: 0 }, undefined)
+      if (json && json.candidates) return { ok: true, model: m }
     } catch (e) {
       lastErr = e
-      const msg = String(e?.message || '')
-      // Try switching API version to v1 if v1beta complaint appears
-      if (/v1beta/i.test(msg)) {
-        try { setApiVersion('v1') } catch {}
-      }
-      // Continue to next model
     }
   }
   return { ok: false, error: String(lastErr?.message || 'UNKNOWN') }
