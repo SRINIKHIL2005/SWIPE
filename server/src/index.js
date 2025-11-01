@@ -25,7 +25,7 @@ app.get('/', (req, res) => {
   })
 })
 
-const AI_ENABLED = !!process.env.GOOGLE_API_KEY
+const AI_ENABLED = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)
 const AI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 const AI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 
@@ -36,7 +36,7 @@ app.get('/health', async (req, res) => {
     try {
       const r = await checkAIConnectivity()
       // Only expose minimal key shape to avoid leaking secrets
-      const key = process.env.GOOGLE_API_KEY || ''
+      const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ''
       const looksLikeAIStudio = key.startsWith('AIza')
       const keyShape = { present: !!key, looksLikeAIStudio, length: key.length }
       ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined, keyShape, apiVersionVerified: r.apiVersionVerified }
@@ -66,7 +66,7 @@ app.get('/ai/echo', async (req, res) => {
   try {
     const prompt = String(req.query.prompt || 'Say ok only')
     const r = await aiEcho(prompt, true)
-    const key = process.env.GOOGLE_API_KEY || ''
+    const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ''
     const looksLikeAIStudio = key.startsWith('AIza')
     const keyShape = { present: !!key, looksLikeAIStudio, length: key.length }
     res.json({ ok: r.ok, model: r.modelUsed, apiVersionUsed: r.apiVersionUsed, text: r.text, error: r.error, keyShape })

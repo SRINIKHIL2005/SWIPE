@@ -5,7 +5,8 @@ import os from 'os'
 import path from 'path'
 import pdfParse from 'pdf-parse'
 
-const API_KEY = process.env.GOOGLE_API_KEY
+// Support either GEMINI_API_KEY or GOOGLE_API_KEY (Gemini keys come from Google AI Studio)
+const API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
 const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 const API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 const BASE_URL = `https://generativelanguage.googleapis.com/${API_VERSION}`
