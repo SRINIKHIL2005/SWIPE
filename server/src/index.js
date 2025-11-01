@@ -39,7 +39,7 @@ app.get('/health', async (req, res) => {
       const key = process.env.GOOGLE_API_KEY || ''
       const looksLikeAIStudio = key.startsWith('AIza')
       const keyShape = { present: !!key, looksLikeAIStudio, length: key.length }
-      ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined, keyShape }
+      ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined, keyShape, apiVersionVerified: r.apiVersionVerified }
     } catch (e) {
       ai = { ...ai, valid: false, error: String(e?.message||'UNKNOWN') }
     }

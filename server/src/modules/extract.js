@@ -18,22 +18,32 @@ function setApiVersion(version) {
 }
 
 async function httpGenerateContent(model, parts, generationConfig = {}, debugLog) {
-  const url = `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(API_KEY||'')}`
+  const versionsToTry = Array.from(new Set([API_VERSION, 'v1beta']))
   const body = { contents: [{ role: 'user', parts }], generationConfig }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    const safeUrl = url.replace(/(key=)[^&]+/i, '$1****')
-    if (debugLog) debugLog.push({ step: 'http-generate-error', status: res.status, url: safeUrl, responsePreview: text.slice(0, 400) })
-    throw new Error(`HTTP ${res.status}: ${text}`)
+  let lastErr
+  for (const ver of versionsToTry) {
+    const base = `https://generativelanguage.googleapis.com/${ver}`
+    const url = `${base}/models/${model}:generateContent?key=${encodeURIComponent(API_KEY||'')}`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      const safeUrl = url.replace(/(key=)[^&]+/i, '$1****')
+      if (debugLog) debugLog.push({ step: 'http-generate-error', status: res.status, url: safeUrl, responsePreview: text.slice(0, 400) })
+      lastErr = new Error(`HTTP ${res.status}: ${text}`)
+      // If model not found for v1, try next (likely v1beta)
+      if (res.status === 404 && /not found for API version/i.test(text)) continue
+      // Otherwise break
+      break
+    }
+    const json = await res.json()
+    if (debugLog) debugLog.push({ step: 'http-generate-ok', model, apiVersionUsed: ver })
+    return json
   }
-  const json = await res.json()
-  if (debugLog) debugLog.push({ step: 'http-generate-ok', model })
-  return json
+  throw lastErr || new Error('generateContent failed')
 }
 
 const systemSchema = `
@@ -224,11 +234,11 @@ async function extractFromPdfBuffer(buf, debugLog) {
     // Basic field extraction heuristics
     const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean)
 
-    // Customer block: look for "Bill To" or "Customer"
+    // Customer block: look for common labels: Bill To / Billed To / Customer / Customer Name / Buyer / Party / Client
     let customerName = ''
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i]
-      if (/^(bill\s*to|billed\s*to|customer)[:\s]/i.test(l)) {
+      if (/^(bill\s*to|billed\s*to|customer(?:\s*name)?|buyer|party|client)[:\s]/i.test(l)) {
         // Take current line (after colon) or next non-empty line(s)
         const after = l.split(/:\s*/i)[1]
         if (after && after.trim()) { customerName = after.trim() }
@@ -238,6 +248,13 @@ async function extractFromPdfBuffer(buf, debugLog) {
           if (cand) customerName = cand
         }
         break
+      }
+    }
+    // Secondary scan for inline key-value like "Customer: XYZ" anywhere
+    if (!customerName) {
+      for (const l of lines) {
+        const m = l.match(/(?:customer(?:\s*name)?|buyer|party|client)\s*[:\-]\s*(.+)$/i)
+        if (m && m[1]) { customerName = m[1].trim(); break }
       }
     }
 
@@ -256,17 +273,17 @@ async function extractFromPdfBuffer(buf, debugLog) {
       if (m && m[1]) { date = m[1]; break }
     }
 
-    // Grand total
+    // Grand total (look for many synonyms)
     let totalAmount = 0
-    for (const l of lines.slice(-20)) { // search near the end
-      const m = l.match(/(grand\s*total|invoice\s*total|total\s*amount|total)\s*[:\-]?\s*([₹$]?\s*[0-9,]+(?:\.[0-9]{1,2})?)/i)
+    for (const l of lines.slice(-40)) { // search near the end
+      const m = l.match(/(grand\s*total|invoice\s*total|total\s*amount|total\s*due|amount\s*due|balance\s*due|net\s*amount|payable)\s*[:\-]?\s*([₹$]?\s*[0-9,]+(?:\.[0-9]{1,2})?)/i)
       if (m && m[2]) {
         totalAmount = Number(m[2].replace(/[^0-9.]/g, '')) || 0
         break
       }
     }
 
-    // Try to locate items table
+    // Try to locate items table (header must contain an item/description column and qty and rate/amount columns)
     // Detect header row
     const headerIdx = lines.findIndex(l => /(description|item|product)/i.test(l) && /(qty|quantity)/i.test(l) && /(rate|price|unit|amount)/i.test(l))
     const items = []
@@ -275,7 +292,18 @@ async function extractFromPdfBuffer(buf, debugLog) {
         const l = lines[i]
         // Split by multiple spaces or tabs
         const parts = l.split(/\s{2,}|\t+/).map(s => s.trim()).filter(Boolean)
-        if (parts.length < 3) continue
+        if (parts.length < 3) {
+          // Also try patterns like "Widget A x2 @ 49.99"
+          const pat = l.match(/^(.+?)\s+(?:x|qty\s*[:#]?)\s*(\d+)\s*@\s*([₹$]?[0-9,]+(?:\.[0-9]{1,2})?)/i)
+          if (pat) {
+            const name = pat[1].trim()
+            const qty = Number(pat[2]) || 0
+            const unitPrice = Number((pat[3]||'').replace(/[^0-9.]/g, '')) || 0
+            if (name && qty && unitPrice) items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+            continue
+          }
+          continue
+        }
         // Heuristic mapping: last is amount or unit price, one of the earlier is qty
         let qty = 0, unitPrice = 0, name = ''
         // Find a numeric token as qty
@@ -292,7 +320,7 @@ async function extractFromPdfBuffer(buf, debugLog) {
           items.push({ productName: name, qty, unitPrice, taxRate: 0 })
         }
         // Stop if we hit another section
-        if (/^(subtotal|tax|total)/i.test(l)) break
+        if (/^(subtotal|tax|total|amount\s*due|balance\s*due|net\s*amount)/i.test(l)) break
       }
     }
 
@@ -327,6 +355,8 @@ async function extractWithGemini(file, debugLog) {
     'gemini-1.5-flash-002',
     'gemini-1.5-pro-latest',
     'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash-8b-latest',
     // Legacy vision-capable models (v1beta friendly)
     'gemini-pro-vision',
     'gemini-1.0-pro-vision',
@@ -454,6 +484,8 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
     'gemini-1.5-flash-002',
     'gemini-1.5-pro-latest',
     'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash-8b-latest',
     'gemini-pro-vision',
     'gemini-1.0-pro-vision',
     'gemini-1.0-pro-vision-latest',
@@ -589,12 +621,19 @@ function normalize(raw) {
 // Lightweight AI connectivity check used by /health?deep=1
 export async function checkAIConnectivity() {
   if (!API_KEY) return { ok: false, error: 'NO_API_KEY' }
-  const candidates = [ MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro' ].filter(Boolean)
+  const candidates = [ MODEL, 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro' ].filter(Boolean)
   let lastErr
   for (const m of candidates) {
     try {
       const json = await httpGenerateContent(m, [ { text: '{"ping":"ok"}' } ], { temperature: 0 }, undefined)
-      if (json && json.candidates) return { ok: true, model: m }
+      if (json && json.candidates) {
+        // If httpGenerateContent logged apiVersionUsed, we can't read it here directly.
+        // Re-run a tiny call with debugLog to capture which version succeeded.
+        const dbg = []
+        await httpGenerateContent(m, [ { text: '{"ping":"ok2"}' } ], { temperature: 0 }, dbg)
+        const ver = (dbg.find(s => s.step === 'http-generate-ok')||{}).apiVersionUsed
+        return { ok: true, model: m, apiVersionVerified: ver }
+      }
     } catch (e) {
       lastErr = e
     }
