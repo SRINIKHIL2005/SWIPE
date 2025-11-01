@@ -91,45 +91,60 @@ async function extractFromExcelBuffer(buf) {
   const sheet = wb.Sheets[wb.SheetNames[0]]
   const rows = xlsx.utils.sheet_to_json(sheet, { defval: '' })
 
-  // Map likely columns by fuzzy names
+  if (!rows.length) return { products: [], customers: [], invoices: [] }
+
+  // Map likely columns by fuzzy names (expanded synonyms)
   const header = Object.keys(rows[0] || {})
   const pick = (keys) => header.find(h => keys.some(k => h.toLowerCase().includes(k)))
-  const serialKey = pick(['serial','invoice'])
-  const custKey = pick(['customer','name'])
-  const phoneKey = pick(['phone','mobile'])
-  const productKey = pick(['product','item'])
-  const qtyKey = pick(['qty','quantity'])
-  const priceKey = pick(['unit','price','rate'])
-  const taxKey = pick(['tax','gst'])
-  const totalKey = pick(['total','amount'])
-  const dateKey = pick(['date'])
+  const serialKey = pick(['serial','invoice','inv','bill no','bill','sno','sr no'])
+  const custKey = pick(['customer','party','client','buyer','name'])
+  const phoneKey = pick(['phone','mobile','contact'])
+  const productKey = pick(['product','item','description'])
+  const qtyKey = pick(['qty','quantity','pcs','pieces','units'])
+  const priceKey = pick(['unit price','unit','price','rate','amount'])
+  const taxKey = pick(['tax','gst','cgst','sgst','igst','vat'])
+  const totalKey = pick(['grand total','invoice total','total amount','total','amount'])
+  const dateKey = pick(['invoice date','bill date','date','dt'])
 
   const products = []
   const customers = []
   const invoices = []
 
   for (const r of rows) {
-    const name = String(r[productKey] || '').trim()
-    const unitPrice = Number(r[priceKey] || 0)
-    const qty = Number(r[qtyKey] || 0)
-    const taxRate = Number(r[taxKey] || 0)
+    const name = String(productKey ? r[productKey] : '').trim()
+    const cust = String(custKey ? r[custKey] : '').trim()
+    const phone = String(phoneKey ? r[phoneKey] : '').trim()
+    const unitPrice = Number(priceKey ? r[priceKey] : 0) || 0
+    const qty = Number(qtyKey ? r[qtyKey] : 0) || 0
+    // tax may be in percent form (e.g., 18). Convert >1 to fraction.
+    let taxRaw = Number(taxKey ? r[taxKey] : 0) || 0
+    const taxRate = taxRaw > 1.0 ? (taxRaw / 100) : taxRaw
     const priceWithTax = unitPrice * (1 + taxRate)
-    if (name) products.push({ name, unitPrice, taxRate, priceWithTax, quantity: qty })
+    const totalFromRow = Number(totalKey ? r[totalKey] : 0) || 0
+    const date = String(dateKey ? r[dateKey] : '').trim()
+    const serial = String(serialKey ? r[serialKey] : '').trim()
 
-    const cust = String(r[custKey] || '').trim()
-    const phone = String(r[phoneKey] || '').trim()
-    const totalPurchase = Number(r[totalKey] || 0)
-    if (cust) customers.push({ name: cust, phone, totalPurchase })
+    // Only record rows that look like data
+    const hasAny = name || cust || unitPrice || qty || totalFromRow
+    if (!hasAny) continue
 
+    if (name) {
+      products.push({ name, unitPrice, taxRate, priceWithTax, quantity: qty })
+    }
+    if (cust) {
+      customers.push({ name: cust, phone, totalPurchase: totalFromRow })
+    }
     invoices.push({
-      serialNumber: String(r[serialKey] || '').trim(),
+      serialNumber: serial,
       customerName: cust,
-      date: String(r[dateKey] || '').trim(),
-      items: [{ productName: name, qty, unitPrice, taxRate }],
+      date,
+      items: name ? [{ productName: name, qty, unitPrice, taxRate }] : [],
       tax: unitPrice * qty * taxRate,
-      totalAmount: Number(r[totalKey] || (unitPrice * qty * (1 + taxRate)))
+      totalAmount: totalFromRow || (unitPrice * qty * (1 + taxRate))
     })
   }
+
+  // If still nothing, return empty
   return { products, customers, invoices }
 }
 
@@ -147,7 +162,7 @@ async function extractWithGemini(file) {
   })
   // Best-effort cleanup
   try { await fs.unlink(tmpPath) } catch {}
-  const prompt = `${systemSchema}\nAnalyze the attached file and extract fields. Return only valid JSON as specified.`
+  const prompt = `${systemSchema}\nAnalyze the attached file (it may be an invoice PDF/image or a spreadsheet).\n- If spreadsheet: detect header synonyms (item/description, qty, rate/price, gst/cgst/sgst/igst, customer/party, invoice no, date).\n- If PDF/image: OCR and read tables and key-value blocks.\n- Return arrays even if only one item is found.\nReturn only valid JSON as specified.`
 
   const candidates = Array.from(new Set([
     MODEL,
@@ -156,13 +171,80 @@ async function extractWithGemini(file) {
     'gemini-1.5-flash-latest',
   ])).filter(Boolean)
 
+  // Strongly-typed JSON schema enforcement (Gemini structured response)
+  const responseSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      products: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            name: { type: 'string' },
+            unitPrice: { type: 'number' },
+            taxRate: { type: 'number' },
+            priceWithTax: { type: 'number' },
+            quantity: { type: 'number' },
+            discount: { type: 'number' }
+          },
+          required: ['name','unitPrice','taxRate','priceWithTax']
+        }
+      },
+      customers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            name: { type: 'string' },
+            phone: { type: 'string' },
+            totalPurchase: { type: 'number' }
+          },
+          required: ['name']
+        }
+      },
+      invoices: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            serialNumber: { type: 'string' },
+            customerName: { type: 'string' },
+            date: { type: 'string' },
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  productName: { type: 'string' },
+                  qty: { type: 'number' },
+                  unitPrice: { type: 'number' },
+                  taxRate: { type: 'number' }
+                },
+                required: ['productName','qty','unitPrice','taxRate']
+              }
+            },
+            tax: { type: 'number' },
+            totalAmount: { type: 'number' }
+          },
+          required: ['customerName','items']
+        }
+      }
+    },
+    required: ['products','customers','invoices']
+  }
+
   let result
   let lastErr
   for (const m of candidates) {
     try {
       const model = genAI.getGenerativeModel({
         model: m,
-        generationConfig: { responseMimeType: 'application/json' }
+        generationConfig: { responseMimeType: 'application/json', responseSchema, temperature: 0.2 }
       })
       result = await model.generateContent([
         { text: prompt },
