@@ -1,5 +1,4 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import { GoogleAIFileManager } from '@google/generative-ai/server'
 import xlsx from 'xlsx'
 import fs from 'fs/promises'
 import os from 'os'
@@ -10,7 +9,6 @@ const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 const API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 
 let genAI = API_KEY ? new GoogleGenerativeAI({ apiKey: API_KEY, apiVersion: API_VERSION }) : null
-const fileMgr = API_KEY ? new GoogleAIFileManager({ apiKey: API_KEY, apiVersion: API_VERSION }) : null
 
 function setApiVersion(version) {
   if (!API_KEY) return
@@ -187,25 +185,6 @@ async function extractFromExcelBuffer(buf, debugLog) {
 
 async function extractWithGemini(file, debugLog) {
   const mimeType = file.mimetype
-  // GoogleAIFileManager.uploadFile expects a file path on Node.
-  // Write the buffer to a temp file, upload, then clean up.
-  const tmpDir = os.tmpdir()
-  const ext = (file.originalname.split('.').pop() || 'bin').toLowerCase()
-  const tmpPath = path.join(tmpDir, `upload_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`)
-  let upload = null
-  try {
-    await fs.writeFile(tmpPath, file.buffer)
-    upload = await fileMgr.uploadFile(tmpPath, {
-      mimeType,
-      displayName: file.originalname,
-    })
-  } catch (e) {
-    const msg = String(e?.message || '')
-    if (debugLog) debugLog.push({ step: 'gemini-upload-error', error: msg })
-  } finally {
-    // Best-effort cleanup
-    try { await fs.unlink(tmpPath) } catch {}
-  }
   const prompt = `${systemSchema}\nAnalyze the attached file (it may be an invoice PDF/image or a spreadsheet).\n- If spreadsheet: detect header synonyms (item/description, qty, rate/price, gst/cgst/sgst/igst, customer/party, invoice no, date).\n- If PDF/image: OCR and read tables and key-value blocks.\n- Return arrays even if only one item is found.\nReturn only valid JSON as specified.`
 
   const candidates = Array.from(new Set([
@@ -295,20 +274,12 @@ async function extractWithGemini(file, debugLog) {
         model: m,
         generationConfig: { responseMimeType: 'application/json', responseSchema, temperature: 0.2 }
       })
-      if (upload && upload.file?.uri) {
-        result = await model.generateContent([
-          { text: prompt },
-          { fileData: { fileUri: upload.file.uri, mimeType } }
-        ])
-        if (debugLog) debugLog.push({ step: 'gemini-generate', model: m, uri: upload.file.uri })
-      } else {
-        const b64 = Buffer.from(file.buffer).toString('base64')
-        result = await model.generateContent([
-          { text: prompt },
-          { inlineData: { data: b64, mimeType } }
-        ])
-        if (debugLog) debugLog.push({ step: 'gemini-generate-inline', model: m, bytes: file.buffer?.length||0 })
-      }
+      const b64 = Buffer.from(file.buffer).toString('base64')
+      result = await model.generateContent([
+        { text: prompt },
+        { inlineData: { data: b64, mimeType } }
+      ])
+      if (debugLog) debugLog.push({ step: 'gemini-generate-inline', model: m, bytes: file.buffer?.length||0 })
       break
     } catch (e) {
       lastErr = e
