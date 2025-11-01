@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useDispatch } from 'react-redux'
 import type { AppDispatch } from '@store'
@@ -13,6 +13,30 @@ export default function UploadPanel() {
   const [status, setStatus] = useState<'idle'|'uploading'|'success'|'error'>('idle')
   const [message, setMessage] = useState<string>('')
   const [dragOver, setDragOver] = useState(false)
+  const [apiStatus, setApiStatus] = useState<'unknown'|'online'|'offline'>('unknown')
+  const [apiInfo, setApiInfo] = useState<string>('')
+
+  useEffect(() => {
+    let mounted = true
+    async function ping() {
+      try {
+        const res = await axios.get(`${API_BASE}/health`, { timeout: 3000 })
+        const ok = !!res.data?.ok
+        if (!mounted) return
+        setApiStatus(ok ? 'online' : 'offline')
+        const enabled = res.data?.ai?.enabled ? 'on' : 'off'
+        const model = res.data?.ai?.model || 'n/a'
+        setApiInfo(`AI ${enabled} • ${model}`)
+      } catch (_) {
+        if (!mounted) return
+        setApiStatus('offline')
+        setApiInfo('unreachable')
+      }
+    }
+    ping()
+    const id = setInterval(ping, 20000)
+    return () => { mounted = false; clearInterval(id) }
+  }, [])
 
   async function onFiles(files: FileList | null) {
     if (!files || files.length === 0) return
@@ -71,7 +95,10 @@ export default function UploadPanel() {
             {dragOver ? 'Drop to start upload' : 'Or drag & drop Excel, PDF, or images'}
           </span>
         </div>
-        <div>
+        <div style={{display:'flex', gap:10, alignItems:'center'}}>
+          {apiStatus==='online' && <span className="badge success">API Online • {apiInfo}</span>}
+          {apiStatus==='offline' && <span className="badge error">API Offline</span>}
+          {apiStatus==='unknown' && <span className="badge">API Checking…</span>}
           {status==='uploading' && <span className="badge">⏳ {message}</span>}
           {status==='success' && <span className="badge success">✅ {message}</span>}
           {status==='error' && <span className="badge error">❌ {message}</span>}
