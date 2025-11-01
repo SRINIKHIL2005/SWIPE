@@ -22,13 +22,16 @@ export default function UploadPanel() {
     let mounted = true
     async function ping() {
       try {
-        const res = await axios.get(`${API_BASE}/health`, { timeout: 3000 })
+        const res = await axios.get(`${API_BASE}/health${debug ? '?deep=1' : ''}`, { timeout: 4000 })
         const ok = !!res.data?.ok
         if (!mounted) return
         setApiStatus(ok ? 'online' : 'offline')
         const enabled = res.data?.ai?.enabled ? 'on' : 'off'
         const model = res.data?.ai?.model || 'n/a'
-        setApiInfo(`AI ${enabled} • ${model}`)
+        const apiVer = res.data?.ai?.apiVersion ? ` • ${res.data.ai.apiVersion}` : ''
+        const valid = res.data?.ai?.valid
+        const suffix = valid===false ? ' • key invalid' : ''
+        setApiInfo(`AI ${enabled} • ${model}${apiVer}${suffix}`)
       } catch (_) {
         if (!mounted) return
         setApiStatus('offline')
@@ -38,7 +41,7 @@ export default function UploadPanel() {
     ping()
     const id = setInterval(ping, 20000)
     return () => { mounted = false; clearInterval(id) }
-  }, [])
+  }, [debug])
 
   async function onFiles(files: FileList | null) {
     if (!files || files.length === 0) return

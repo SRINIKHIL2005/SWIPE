@@ -521,3 +521,32 @@ function normalize(raw) {
 
   return { products, customers, invoices }
 }
+
+// Lightweight AI connectivity check used by /health?deep=1
+export async function checkAIConnectivity() {
+  if (!API_KEY || !genAI) return { ok: false, error: 'NO_API_KEY' }
+  const candidates = [
+    MODEL,
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+    'gemini-pro',
+  ].filter(Boolean)
+  let lastErr
+  for (const m of candidates) {
+    try {
+      const model = genAI.getGenerativeModel({ model: m, generationConfig: { temperature: 0, responseMimeType: 'application/json' } })
+      // Tiny prompt to avoid costs; expect trivial JSON
+      const resp = await model.generateContent([{ text: '{"ping":"ok"}' }])
+      if (resp && resp.response) return { ok: true, model: m }
+    } catch (e) {
+      lastErr = e
+      const msg = String(e?.message || '')
+      // Try switching API version to v1 if v1beta complaint appears
+      if (/v1beta/i.test(msg)) {
+        try { setApiVersion('v1') } catch {}
+      }
+      // Continue to next model
+    }
+  }
+  return { ok: false, error: String(lastErr?.message || 'UNKNOWN') }
+}

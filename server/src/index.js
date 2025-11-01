@@ -3,7 +3,7 @@ import cors from 'cors'
 import multer from 'multer'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { extractFromFiles } from './modules/extract.js'
+import { extractFromFiles, checkAIConnectivity } from './modules/extract.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -29,8 +29,18 @@ const AI_ENABLED = !!process.env.GOOGLE_API_KEY
 const AI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
 const AI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, ai: { enabled: AI_ENABLED, model: AI_MODEL, apiVersion: AI_API_VERSION } })
+app.get('/health', async (req, res) => {
+  const deep = String(req.query.deep||'').toLowerCase()
+  let ai = { enabled: AI_ENABLED, model: AI_MODEL, apiVersion: AI_API_VERSION }
+  if (AI_ENABLED && (deep==='1' || deep==='true')) {
+    try {
+      const r = await checkAIConnectivity()
+      ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined }
+    } catch (e) {
+      ai = { ...ai, valid: false, error: String(e?.message||'UNKNOWN') }
+    }
+  }
+  res.json({ ok: true, ai })
 })
 
 app.post('/api/extract', upload.array('files'), async (req, res) => {
