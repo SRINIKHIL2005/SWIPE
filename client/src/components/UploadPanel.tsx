@@ -15,6 +15,8 @@ export default function UploadPanel() {
   const [dragOver, setDragOver] = useState(false)
   const [apiStatus, setApiStatus] = useState<'unknown'|'online'|'offline'>('unknown')
   const [apiInfo, setApiInfo] = useState<string>('')
+  const [debug, setDebug] = useState<boolean>(false)
+  const [debugData, setDebugData] = useState<any>(null)
 
   useEffect(() => {
     let mounted = true
@@ -45,10 +47,11 @@ export default function UploadPanel() {
     setStatus('uploading')
     setMessage('Uploading and extracting…')
     try {
-      const res = await axios.post(`${API_BASE}/api/extract`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+      const res = await axios.post(`${API_BASE}/api/extract${debug ? '?debug=1' : ''}`, form, {
+        headers: { 'Content-Type': 'multipart/form-data', ...(debug ? {'x-debug':'1'}:{} ) }
       })
       const data = res.data
+      setDebugData(data?._debug || null)
       const p = Array.isArray(data?.products) ? data.products : []
       const c = Array.isArray(data?.customers) ? data.customers : []
       const i = Array.isArray(data?.invoices) ? data.invoices : []
@@ -96,6 +99,9 @@ export default function UploadPanel() {
           </span>
         </div>
         <div style={{display:'flex', gap:10, alignItems:'center'}}>
+          <label style={{display:'flex',alignItems:'center',gap:6,color:'#cbd5e1'}}>
+            <input type="checkbox" checked={debug} onChange={(e)=>setDebug(e.target.checked)} /> Debug
+          </label>
           {apiStatus==='online' && <span className="badge success">API Online • {apiInfo}</span>}
           {apiStatus==='offline' && <span className="badge error">API Offline</span>}
           {apiStatus==='unknown' && <span className="badge">API Checking…</span>}
@@ -104,6 +110,11 @@ export default function UploadPanel() {
           {status==='error' && <span className="badge error">❌ {message}</span>}
         </div>
       </div>
+      {debug && debugData && (
+        <pre style={{marginTop:10, maxHeight:200, overflow:'auto', background:'#0b1224', padding:10, borderRadius:8, color:'#9fb7ff'}}>
+          {JSON.stringify(debugData, null, 2)}
+        </pre>
+      )}
     </section>
   )
 }
