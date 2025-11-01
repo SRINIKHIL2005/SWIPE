@@ -35,7 +35,11 @@ app.get('/health', async (req, res) => {
   if (AI_ENABLED && (deep==='1' || deep==='true')) {
     try {
       const r = await checkAIConnectivity()
-      ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined }
+      // Only expose minimal key shape to avoid leaking secrets
+      const key = process.env.GOOGLE_API_KEY || ''
+      const looksLikeAIStudio = key.startsWith('AIza')
+      const keyShape = { present: !!key, looksLikeAIStudio, length: key.length }
+      ai = { ...ai, valid: !!r.ok, error: r.ok ? undefined : r.error, modelVerified: r.model || undefined, keyShape }
     } catch (e) {
       ai = { ...ai, valid: false, error: String(e?.message||'UNKNOWN') }
     }
