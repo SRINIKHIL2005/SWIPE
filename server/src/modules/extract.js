@@ -26,7 +26,8 @@ async function httpGenerateContent(model, parts, generationConfig = {}, debugLog
   })
   if (!res.ok) {
     const text = await res.text()
-    if (debugLog) debugLog.push({ step: 'http-generate-error', status: res.status, url, responsePreview: text.slice(0, 400) })
+    const safeUrl = url.replace(/(key=)[^&]+/i, '$1****')
+    if (debugLog) debugLog.push({ step: 'http-generate-error', status: res.status, url: safeUrl, responsePreview: text.slice(0, 400) })
     throw new Error(`HTTP ${res.status}: ${text}`)
   }
   const json = await res.json()
