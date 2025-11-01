@@ -267,6 +267,18 @@ async function extractFromPdfBuffer(buf, debugLog) {
       }
     }
 
+    // Extract customer phone number
+    let customerPhone = ''
+    for (const l of lines) {
+      // Look for phone patterns near customer section or standalone
+      const phoneMatch = l.match(/(?:phone|mobile|ph|tel|contact)[:\s]*([+]?[0-9\s\-\(\)]{7,15})/i) || 
+                         l.match(/\b([+]?[0-9]{1,4}[\s\-]?[0-9]{3,4}[\s\-]?[0-9]{3,4}[\s\-]?[0-9]{3,4})\b/)
+      if (phoneMatch && phoneMatch[1]) {
+        customerPhone = phoneMatch[1].replace(/[\s\-\(\)]/g, '')
+        if (customerPhone.length >= 7) break
+      }
+    }
+
     // Invoice number: require digits in the captured segment to avoid grabbing the tail of the word "INVOICE"
     let serialNumber = ''
     for (let idx = 0; idx < lines.length; idx++) {
@@ -336,10 +348,11 @@ async function extractFromPdfBuffer(buf, debugLog) {
       }
     }
 
-    // Try to locate items table (header must contain an item/description column and qty and rate/amount columns)
-    // Detect header row
-    const headerIdx = lines.findIndex(l => /(description|item|product)/i.test(l) && /(qty|quantity)/i.test(l) && /(rate|price|unit|amount)/i.test(l))
+    // Try to locate items table with multiple strategies
     const items = []
+    
+    // Strategy 1: Look for explicit table headers
+    const headerIdx = lines.findIndex(l => /(description|item|product|particulars)/i.test(l) && /(qty|quantity|nos)/i.test(l) && /(rate|price|unit|amount)/i.test(l))
     if (headerIdx >= 0) {
       for (let i = headerIdx + 1; i < lines.length; i++) {
         const l = lines[i]
@@ -358,39 +371,97 @@ async function extractFromPdfBuffer(buf, debugLog) {
           continue
         }
         // Heuristic mapping: last is amount or unit price, one of the earlier is qty
-        let qty = 0, unitPrice = 0, name = ''
-        // Find a numeric token as qty
+        let qty = 0, unitPrice = 0, name = '', taxRate = 0
+        // Find a numeric token as qty (usually small numbers)
         for (let j = 1; j < parts.length; j++) {
           const num = Number(parts[j].replace(/[^0-9.]/g, ''))
-          if (!Number.isNaN(num) && num > 0) { qty = num; break }
+          if (!Number.isNaN(num) && num > 0 && num < 10000) { qty = num; break }
         }
-        // Unit price likely in the last 1-2 tokens
-        const tailNums = parts.slice(-2).map(t => Number(t.replace(/[^0-9.]/g, ''))).filter(n => !Number.isNaN(n))
-        if (tailNums.length) unitPrice = tailNums[0]
+        // Unit price likely in the last 1-2 tokens (larger numbers)
+        const tailNums = parts.slice(-3).map(t => Number(t.replace(/[^0-9.]/g, ''))).filter(n => !Number.isNaN(n) && n > 0)
+        if (tailNums.length >= 2) {
+          unitPrice = tailNums[0] // rate/price
+          // Last number might be total amount for this line
+        } else if (tailNums.length === 1) {
+          unitPrice = tailNums[0]
+        }
         // Name is first token(s)
         name = parts[0]
-        if (name && (qty || unitPrice)) {
-          items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+        
+        // Extract tax rate if present (look for percentage)
+        for (const part of parts) {
+          const taxMatch = part.match(/(\d+(?:\.\d+)?)\s*%/)
+          if (taxMatch) {
+            taxRate = Number(taxMatch[1]) / 100
+            break
+          }
+        }
+        
+        if (name && (qty || unitPrice) && !/^(subtotal|tax|total|amount\s*due|balance\s*due|net\s*amount|grand|final)/i.test(name)) {
+          items.push({ productName: name, qty: qty || 1, unitPrice: unitPrice || 0, taxRate })
         }
         // Stop if we hit another section
-        if (/^(subtotal|tax|total|amount\s*due|balance\s*due|net\s*amount)/i.test(l)) break
+        if (/^(subtotal|tax|total|amount\s*due|balance\s*due|net\s*amount|grand|final)/i.test(l)) break
       }
     }
-    // Fallback items scan if none detected yet: look for lines with name then qty then price (2-3 numbers)
+    
+    // Strategy 2: Numbered items (1., 2., etc.) with description and amounts
+    if (items.length === 0) {
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]
+        // Look for numbered items like "1 ITEM NAME 100.00 5.00 500.00"
+        const numbered = l.match(/^(\d+)\s+(.+?)\s+([0-9,]+(?:\.[0-9]{1,2})?)\s+([0-9,]+(?:\.[0-9]{1,2})?)\s+([0-9,]+(?:\.[0-9]{1,2})?)/)
+        if (numbered) {
+          const name = numbered[2].trim()
+          const qty = Number(numbered[3].replace(/[^0-9.]/g, '')) || 1
+          const unitPrice = Number(numbered[4].replace(/[^0-9.]/g, '')) || 0
+          const amount = Number(numbered[5].replace(/[^0-9.]/g, '')) || 0
+          
+          // Validate the math makes sense
+          if (name && unitPrice > 0 && Math.abs(qty * unitPrice - amount) < (amount * 0.3)) {
+            items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+          }
+        }
+      }
+    }
+    
+    // Strategy 3: Fallback pattern matching for any line with product-like structure
     if (items.length === 0) {
       for (const l of lines) {
-        const m = l.match(/^(.+?)\s+(\d{1,4})\s+([₹$]?[0-9,]+(?:\.[0-9]{1,2})?)(?:\s+([₹$]?[0-9,]+(?:\.[0-9]{1,2})?))?$/)
-        if (m) {
-          const name = m[1].trim()
-          const qty = Number(m[2]) || 0
-          const unitPrice = Number((m[3]||'').replace(/[^0-9.]/g, '')) || 0
-          if (name && qty && unitPrice) items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+        // Skip obvious non-product lines
+        if (/^(invoice|bill|tax|total|subtotal|amount|due|customer|consignee|gstin|place|bank|terms)/i.test(l)) continue
+        
+        // Look for patterns: Name Numbers Numbers (at least 2 numbers that could be qty and price)
+        const patterns = [
+          // "Product Name 5 100.00 500.00" (qty, rate, amount)
+          l.match(/^([A-Za-z][^0-9]+?)\s+(\d{1,4})\s+([0-9,]+(?:\.[0-9]{1,2})?)\s+([0-9,]+(?:\.[0-9]{1,2})?)$/),
+          // "Product Name 100.00" (just rate)
+          l.match(/^([A-Za-z][^0-9]+?)\s+([0-9,]+(?:\.[0-9]{1,2})?)$/)
+        ]
+        
+        for (const m of patterns) {
+          if (m) {
+            const name = m[1].trim()
+            let qty = 1, unitPrice = 0
+            
+            if (m.length === 5) { // qty, rate, amount pattern
+              qty = Number(m[2]) || 1
+              unitPrice = Number((m[3]||'').replace(/[^0-9.]/g, '')) || 0
+            } else if (m.length === 3) { // just rate pattern
+              unitPrice = Number((m[2]||'').replace(/[^0-9.]/g, '')) || 0
+            }
+            
+            if (name.length > 3 && unitPrice > 0) {
+              items.push({ productName: name, qty, unitPrice, taxRate: 0 })
+              break
+            }
+          }
         }
       }
     }
 
     const products = items.map(it => ({ name: it.productName, unitPrice: it.unitPrice, taxRate: it.taxRate, priceWithTax: it.unitPrice * (1 + it.taxRate), quantity: it.qty }))
-    const customers = customerName ? [{ name: customerName, phone: '', totalPurchase: totalAmount }] : []
+    const customers = customerName ? [{ name: customerName, phone: customerPhone, totalPurchase: totalAmount }] : []
     const invoices = [{ serialNumber, customerName, date, items, tax: 0, totalAmount }]
 
     if (debugLog) debugLog.push({ step: 'pdf-extracted', items: items.length, customerName: !!customerName, serialNumber: !!serialNumber, totalAmount })
