@@ -57,14 +57,27 @@ export async function extractFromFiles(files) {
     const ext = (f.originalname.split('.').pop() || '').toLowerCase()
     if (['xls','xlsx','csv'].includes(ext)) {
       let fromX = await extractFromExcelBuffer(f.buffer)
-      // If Excel heuristic yielded nothing and AI is available, try AI pass as fallback
+      // If Excel heuristic yielded nothing and AI is available, try CSV-text AI, then file-upload AI as last resort
       if (API_KEY && (!fromX.products?.length && !fromX.customers?.length && !fromX.invoices?.length)) {
-        const aiFallback = await extractWithGemini({
-          buffer: f.buffer,
-          originalname: f.originalname,
-          mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        })
-        fromX = aiFallback
+        try {
+          const wb = xlsx.read(f.buffer, { type: 'buffer' })
+          const sheet = wb.Sheets[wb.SheetNames[0]]
+          const csvText = xlsx.utils.sheet_to_csv(sheet)
+          if (csvText && csvText.trim().length > 0) {
+            const aiFromCsv = await extractWithGeminiFromCSV(csvText, f.originalname)
+            if (aiFromCsv && (aiFromCsv.products?.length || aiFromCsv.customers?.length || aiFromCsv.invoices?.length)) {
+              fromX = aiFromCsv
+            }
+          }
+        } catch {}
+        if (!fromX.products?.length && !fromX.customers?.length && !fromX.invoices?.length) {
+          const aiFallback = await extractWithGemini({
+            buffer: f.buffer,
+            originalname: f.originalname,
+            mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          })
+          fromX = aiFallback
+        }
       }
       merge(merged, fromX)
     } else if (API_KEY) {
@@ -282,6 +295,70 @@ async function extractWithGemini(file) {
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
       return JSON.parse(text.slice(jsonStart, jsonEnd))
     }
+  } catch {}
+  return { products: [], customers: [], invoices: [] }
+}
+
+async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv') {
+  const prompt = `${systemSchema}\nThe following text is a CSV export of an invoice spreadsheet.\n- Infer headers (e.g., item/description, qty, rate/price, gst/cgst/sgst/igst, customer/party, invoice no, date, total).\n- Parse rows into products, customers, and invoices as per the schema.\nCSV Content (begin):\n\n${csvText}\n\nCSV Content (end).\nReturn only valid JSON conforming to the schema.`
+
+  const candidates = Array.from(new Set([
+    MODEL,
+    'gemini-1.5-pro-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+  ])).filter(Boolean)
+
+  const responseSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      products: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        name: { type: 'string' }, unitPrice: { type: 'number' }, taxRate: { type: 'number' }, priceWithTax: { type: 'number' }, quantity: { type: 'number' }, discount: { type: 'number' }
+      }, required: ['name','unitPrice','taxRate','priceWithTax'] } },
+      customers: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        name: { type: 'string' }, phone: { type: 'string' }, totalPurchase: { type: 'number' }
+      }, required: ['name'] } },
+      invoices: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        serialNumber: { type: 'string' }, customerName: { type: 'string' }, date: { type: 'string' },
+        items: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { productName: { type: 'string' }, qty: { type: 'number' }, unitPrice: { type: 'number' }, taxRate: { type: 'number' } }, required: ['productName','qty','unitPrice','taxRate'] } },
+        tax: { type: 'number' }, totalAmount: { type: 'number' }
+      }, required: ['customerName','items'] } }
+    },
+    required: ['products','customers','invoices']
+  }
+
+  let result
+  let lastErr
+  for (const m of candidates) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: m,
+        generationConfig: { responseMimeType: 'application/json', responseSchema, temperature: 0.2 }
+      })
+      result = await model.generateContent([
+        { text: prompt }
+      ])
+      break
+    } catch (e) {
+      lastErr = e
+      const msg = String(e?.message || '')
+      if (!/not found|404/i.test(msg)) break
+    }
+  }
+  if (!result) {
+    console.error('[Gemini generateContent from CSV failed]', lastErr)
+    return { products: [], customers: [], invoices: [] }
+  }
+  const text = await result.response.text()
+  try { return JSON.parse(text) } catch {}
+  try {
+    const m = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+    if (m && m[1]) return JSON.parse(m[1])
+  } catch {}
+  try {
+    const s = text.indexOf('{'), e = text.lastIndexOf('}') + 1
+    if (s >= 0 && e > s) return JSON.parse(text.slice(s, e))
   } catch {}
   return { products: [], customers: [], invoices: [] }
 }
