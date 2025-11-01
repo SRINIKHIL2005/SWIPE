@@ -27,9 +27,10 @@ app.get('/', (req, res) => {
 
 const AI_ENABLED = !!process.env.GOOGLE_API_KEY
 const AI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
+const AI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, ai: { enabled: AI_ENABLED, model: AI_MODEL } })
+  res.json({ ok: true, ai: { enabled: AI_ENABLED, model: AI_MODEL, apiVersion: AI_API_VERSION } })
 })
 
 app.post('/api/extract', upload.array('files'), async (req, res) => {

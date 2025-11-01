@@ -7,9 +7,15 @@ import path from 'path'
 
 const API_KEY = process.env.GOOGLE_API_KEY
 const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest'
+const API_VERSION = process.env.GEMINI_API_VERSION || 'v1'
 
-const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null
-const fileMgr = API_KEY ? new GoogleAIFileManager(API_KEY) : null
+let genAI = API_KEY ? new GoogleGenerativeAI({ apiKey: API_KEY, apiVersion: API_VERSION }) : null
+const fileMgr = API_KEY ? new GoogleAIFileManager({ apiKey: API_KEY, apiVersion: API_VERSION }) : null
+
+function setApiVersion(version) {
+  if (!API_KEY) return
+  genAI = new GoogleGenerativeAI({ apiKey: API_KEY, apiVersion: version })
+}
 
 const systemSchema = `
 You are an information extraction engine. Extract ONLY structured fields and return JSON that matches EXACTLY this schema. Do not include any explanations or markdown.
@@ -292,6 +298,10 @@ async function extractWithGemini(file, debugLog) {
       lastErr = e
       // Try next model id on 404/not found
       const msg = String(e?.message || '')
+      if (/v1beta/i.test(msg)) {
+        // Switch client to v1 if backend complains about v1beta
+        setApiVersion('v1')
+      }
       // If schema isn't supported by this API version, retry without schema
       if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
         try {
@@ -397,6 +407,9 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
       lastErr = e
       const msg = String(e?.message || '')
       if (debugLog) debugLog.push({ step: 'gemini-csv-error', model: m, error: msg })
+      if (/v1beta/i.test(msg)) {
+        setApiVersion('v1')
+      }
       if (/response_schema|Invalid JSON payload|additionalProperties/i.test(msg)) {
         try {
           const modelNoSchema = genAI.getGenerativeModel({
