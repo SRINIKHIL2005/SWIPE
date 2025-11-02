@@ -121,14 +121,19 @@ export async function extractFromFiles(files, { debug=false } = {}) {
       }
       merge(merged, fromX)
     } else if (ext === 'pdf') {
-      // Try local PDF text fallback first (no AI), then AI if available
-      let fromPdf = await extractFromPdfBuffer(f.buffer, debug ? debugLog : undefined)
-      if (API_KEY && (!fromPdf.products?.length && !fromPdf.customers?.length && !fromPdf.invoices?.length)) {
-        if (debug) debugLog.push({ step: 'pdf-ai-fallback', note: 'Local PDF parse yielded little; trying Gemini' })
-        const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
-        fromPdf = fromAI
-      }
+      // Try local PDF text fallback first (no AI)
+      const fromPdf = await extractFromPdfBuffer(f.buffer, debug ? debugLog : undefined)
       merge(merged, fromPdf)
+      // If AI is available, optionally enhance when extraction looks poor
+      if (API_KEY && shouldEnhanceWithAI(fromPdf)) {
+        if (debug) debugLog.push({ step: 'pdf-ai-enhance', note: 'Heuristic says PDF parse is low-quality; enhancing with Gemini' })
+        try {
+          const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
+          merge(merged, fromAI)
+        } catch (e) {
+          if (debug) debugLog.push({ step: 'pdf-ai-enhance-error', error: String(e?.message||'') })
+        }
+      }
     } else if (API_KEY) {
       if (debug) debugLog.push({ step: 'non-excel-file', note: 'Use Gemini', name: f.originalname })
       const fromAI = await extractWithGemini(f, debug ? debugLog : undefined)
@@ -474,6 +479,44 @@ async function extractFromPdfBuffer(buf, debugLog) {
     if (debugLog) debugLog.push({ step: 'pdf-parse-error', error: String(e?.message||'') })
     return { products: [], customers: [], invoices: [] }
   }
+}
+
+// Heuristic: decide if the PDF-only extraction is low-quality and should be enhanced by AI
+function shouldEnhanceWithAI(result) {
+  if (!result) return true
+  const products = Array.isArray(result.products) ? result.products : []
+  const invoices = Array.isArray(result.invoices) ? result.invoices : []
+  const customers = Array.isArray(result.customers) ? result.customers : []
+
+  // No items at all? Enhance.
+  const totalItems = (invoices[0]?.items?.length || 0)
+  if (products.length === 0 && totalItems === 0) return true
+
+  // Product names that look like address/bank/meta lines
+  const badWords = /(karnataka|telangana|bank|ifsc|branch|gstin|invoice|tax|total|amount|pay|upi|terms|conditions|notes|email|place\s*of\s*supply|account)/i
+  let suspicious = 0
+  for (const p of products) {
+    const name = String(p?.name||'')
+    if (!name || name.length < 3) { suspicious++; continue }
+    if (badWords.test(name)) suspicious++
+    // Names that are too long and contain commas likely address lines
+    if (name.length > 40 && /,/.test(name)) suspicious++
+  }
+  if (products.length > 0 && suspicious >= Math.ceil(products.length/2)) return true
+
+  // If all unit prices are zero, likely failed to parse
+  if (products.length > 0 && products.every(p => !Number(p.unitPrice))) return true
+
+  // If invoice has no date or items, enhance
+  if (invoices.length > 0) {
+    const inv = invoices[0]
+    const noDate = !String(inv.date||'').trim()
+    const noItems = !(inv.items?.length)
+    if (noDate || noItems) return true
+  }
+
+  // Looks acceptable
+  return false
 }
 
 // Simple AI echo to verify key and endpoint
