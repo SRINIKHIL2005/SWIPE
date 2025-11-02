@@ -143,8 +143,10 @@ export async function extractFromFiles(files, { debug=false } = {}) {
       merge(merged, { products: [], customers: [], invoices: [] })
     }
   }
+  // Cleanup obvious noise from parsers/AI before normalization
+  const cleaned = cleanResults(merged, debug ? debugLog : undefined)
   // Normalize: map names to ids and compute totals
-  const normalized = normalize(merged)
+  const normalized = normalize(cleaned)
   if (debug) {
     normalized._debug = {
       steps: debugLog,
@@ -797,6 +799,9 @@ function normalize(raw) {
   }
 
   const invoices = []
+  // Seed with provided customers and products to preserve fields like phone and tax
+  for (const p of (raw.products||[])) addProduct(p)
+  for (const c of (raw.customers||[])) addCustomer(c)
   for (const inv of raw.invoices || []) {
     const cid = addCustomer({ name: inv.customerName || '' })
     const items = (inv.items||[]).map(it => {
@@ -828,6 +833,34 @@ function normalize(raw) {
   }
 
   return { products, customers, invoices }
+}
+
+// Remove clearly invalid product entries or address/meta lines that slipped through extraction
+function cleanResults(raw, debugLog) {
+  const badName = (name) => {
+    const s = String(name||'')
+    if (!s.trim()) return true
+    // Address/meta keywords and boilerplate
+    const rx = /(karnataka|telangana|assam|kerala|mumbai|bangalore|hyderabad|address|phone|email|gstin|ifsc|bank|branch|beneficiary|account|upi|terms|conditions|notes|authorized\s*signatory|place\s*of\s*supply|tax\s*invoice|invoice\s*date|invoice\s*#|amount\s*payable|total\s*amount|this\s*is\s*a\s*digitally\s*signed|page\s*\d+|recipient)/i
+    if (rx.test(s)) return true
+    // Too long with commas likely address blocks
+    if (s.length > 60 && /,/.test(s)) return true
+    // All uppercase with commas often address headings
+    if (s.length > 20 && s === s.toUpperCase() && /[A-Z],/.test(s)) return true
+    return false
+  }
+
+  const filteredProducts = (raw.products||[]).filter(p => !badName(p.name))
+  // Also filter invoice items by product name validity
+  const filteredInvoices = (raw.invoices||[]).map(inv => ({
+    ...inv,
+    items: (inv.items||[]).filter(it => !badName(it.productName))
+  }))
+  if (debugLog) {
+    const removed = (raw.products?.length||0) - filteredProducts.length
+    if (removed > 0) debugLog.push({ step: 'cleanup-products', removed })
+  }
+  return { products: filteredProducts, customers: (raw.customers||[]), invoices: filteredInvoices }
 }
 
 // Lightweight AI connectivity check used by /health?deep=1
