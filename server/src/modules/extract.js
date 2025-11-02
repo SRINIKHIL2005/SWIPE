@@ -506,6 +506,11 @@ async function extractWithGemini(file, debugLog) {
 
   const candidates = Array.from(new Set([
     MODEL,
+    // Gemini 2.x
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-pro',
+    'gemini-2.0-flash-lite',
     // Current/recent IDs
     'gemini-1.5-pro',
     'gemini-1.5-pro-001',
@@ -636,6 +641,10 @@ async function extractWithGeminiFromCSV(csvText, originalname='sheet.csv', debug
 
   const candidates = Array.from(new Set([
     MODEL,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-pro',
+    'gemini-2.0-flash-lite',
     'gemini-1.5-pro',
     'gemini-1.5-pro-001',
     'gemini-1.5-pro-002',
@@ -781,7 +790,7 @@ function normalize(raw) {
 // Lightweight AI connectivity check used by /health?deep=1
 export async function checkAIConnectivity() {
   if (!API_KEY) return { ok: false, error: 'NO_API_KEY' }
-  const candidates = [ MODEL, 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro' ].filter(Boolean)
+  const candidates = [ MODEL, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro' ].filter(Boolean)
   let lastErr
   for (const m of candidates) {
     try {

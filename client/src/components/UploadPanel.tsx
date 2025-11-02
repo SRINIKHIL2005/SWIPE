@@ -26,12 +26,14 @@ export default function UploadPanel() {
         const ok = !!res.data?.ok
         if (!mounted) return
         setApiStatus(ok ? 'online' : 'offline')
-        const enabled = res.data?.ai?.enabled ? 'on' : 'off'
-        const model = res.data?.ai?.model || 'n/a'
-        const apiVer = res.data?.ai?.apiVersion ? ` • ${res.data.ai.apiVersion}` : ''
-        const valid = res.data?.ai?.valid
-        const suffix = valid===false ? ' • key invalid' : ''
-        setApiInfo(`AI ${enabled} • ${model}${apiVer}${suffix}`)
+  const enabled = res.data?.ai?.enabled ? 'on' : 'off'
+  const model = res.data?.ai?.model || 'n/a'
+  const apiVer = res.data?.ai?.apiVersion ? ` • ${res.data.ai.apiVersion}` : ''
+  const valid = res.data?.ai?.valid
+  const apiVerUsed = res.data?.ai?.apiVersionVerified ? ` • used ${res.data.ai.apiVersionVerified}` : ''
+  const err = res.data?.ai?.error
+  const suffix = valid===false ? (err ? ` • error: ${String(err).slice(0,48)}` : ' • not ready') : ''
+  setApiInfo(`AI ${enabled} • ${model}${apiVer}${apiVerUsed}${suffix}`)
       } catch (_) {
         if (!mounted) return
         setApiStatus('offline')
