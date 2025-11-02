@@ -841,12 +841,18 @@ function cleanResults(raw, debugLog) {
     const s = String(name||'')
     if (!s.trim()) return true
     // Address/meta keywords and boilerplate
-    const rx = /(karnataka|telangana|assam|kerala|mumbai|bangalore|hyderabad|address|phone|email|gstin|ifsc|bank|branch|beneficiary|account|upi|terms|conditions|notes|authorized\s*signatory|place\s*of\s*supply|tax\s*invoice|invoice\s*date|invoice\s*#|amount\s*payable|total\s*amount|this\s*is\s*a\s*digitally\s*signed|page\s*\d+|recipient)/i
+    const rx = /(karnataka|telangana|assam|kerala|maharashtra|gujarat|tamil\s*nadu|west\s*bengal|delhi|goa|andhra|odisha|chennai|mumbai|kolkata|kochi|bangalore|hyderabad|other\s*territory|address|phone|email|gstin|ifsc|bank|branch|beneficiary|account|upi|terms|conditions|notes|authorized\s*signatory|place\s*of\s*supply|tax\s*invoice|invoice\s*date|invoice\s*#|amount\s*payable|total\s*amount|digitally\s*signed|page\s*\d+|recipient|consignee|ship\s*to|sold\s*to)/i
     if (rx.test(s)) return true
     // Too long with commas likely address blocks
     if (s.length > 60 && /,/.test(s)) return true
+    // Ends with a comma and has no digits -> likely address line
+    if (/,\s*$/.test(s) && !/\d/.test(s)) return true
     // All uppercase with commas often address headings
     if (s.length > 20 && s === s.toUpperCase() && /[A-Z],/.test(s)) return true
+    // Business survey/test/noise keywords that creep in from sample datasets
+    if (/(survey|analysis|quant|dealer|consumers?|sentimental|syntimental|fleetowners|real\s*estate|barcode|images?\s*\d+)/i.test(s)) return true
+    // Very short gibberish tokens (e.g., "78doleo", "copy pr")
+    if (/^[a-z]{2,}\s+[a-z]{2,}$/i.test(s) === true && s.length <= 10) return true
     return false
   }
 
@@ -854,7 +860,11 @@ function cleanResults(raw, debugLog) {
   // Also filter invoice items by product name validity
   const filteredInvoices = (raw.invoices||[]).map(inv => ({
     ...inv,
-    items: (inv.items||[]).filter(it => !badName(it.productName))
+    items: (inv.items||[])
+      // drop obvious bad names
+      .filter(it => !badName(it.productName))
+      // drop items with no meaningful price/qty
+      .filter(it => (Number(it.unitPrice||0) > 0) || (Number(it.qty||0) > 0))
   }))
   if (debugLog) {
     const removed = (raw.products?.length||0) - filteredProducts.length
