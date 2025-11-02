@@ -785,6 +785,8 @@ function normalize(raw) {
   const addCustomer = (c) => {
     const key = (c.name||'').toLowerCase()
     if (!key) return null
+    // Skip if this looks like a product name (contains product keywords or patterns)
+    if (isProductLikeName(key)) return null
     if (!customerIdByName.has(key)) {
       const id = `cust_${customers.length+1}`
       customerIdByName.set(key, id)
@@ -835,6 +837,23 @@ function normalize(raw) {
   return { products, customers, invoices }
 }
 
+// Check if a name looks more like a product than a customer
+function isProductLikeName(name) {
+  const s = String(name||'').toLowerCase()
+  if (!s.trim()) return false
+  
+  // Product indicators
+  const productWords = /(energy|milk|bikis|treat|nutri|choice|gems|chocolate|tea|box|arm|marathon|delivery|shipping|charges|services?|bulk|mixed|buttons|birthday|party|sweet|classic|case|pack?|pouch)/i
+  if (productWords.test(s)) return true
+  
+  // Product patterns
+  if (/\b(bks|pk|pkt)\b/i.test(s)) return true // packaging abbreviations
+  if (/\d+(pk|pkt|case|box|g|kg|ml|l)\b/i.test(s)) return true // quantities with units
+  if (/case\s+\d+/i.test(s)) return true // "CASE 120PK" patterns
+  
+  return false
+}
+
 // Remove clearly invalid product entries or address/meta lines that slipped through extraction
 function cleanResults(raw, debugLog) {
   const badName = (name) => {
@@ -856,6 +875,15 @@ function cleanResults(raw, debugLog) {
     return false
   }
 
+  // Separate customers from products more carefully
+  const cleanedCustomers = (raw.customers||[]).filter(c => {
+    const name = String(c?.name||'')
+    if (!name.trim()) return false
+    if (badName(name)) return false
+    if (isProductLikeName(name)) return false
+    return true
+  })
+
   const filteredProducts = (raw.products||[]).filter(p => !badName(p.name))
   // Also filter invoice items by product name validity
   const filteredInvoices = (raw.invoices||[]).map(inv => ({
@@ -866,11 +894,14 @@ function cleanResults(raw, debugLog) {
       // drop items with no meaningful price/qty
       .filter(it => (Number(it.unitPrice||0) > 0) || (Number(it.qty||0) > 0))
   }))
+  
   if (debugLog) {
-    const removed = (raw.products?.length||0) - filteredProducts.length
-    if (removed > 0) debugLog.push({ step: 'cleanup-products', removed })
+    const removedProducts = (raw.products?.length||0) - filteredProducts.length
+    const removedCustomers = (raw.customers?.length||0) - cleanedCustomers.length
+    if (removedProducts > 0) debugLog.push({ step: 'cleanup-products', removed: removedProducts })
+    if (removedCustomers > 0) debugLog.push({ step: 'cleanup-customers', removed: removedCustomers })
   }
-  return { products: filteredProducts, customers: (raw.customers||[]), invoices: filteredInvoices }
+  return { products: filteredProducts, customers: cleanedCustomers, invoices: filteredInvoices }
 }
 
 // Lightweight AI connectivity check used by /health?deep=1
