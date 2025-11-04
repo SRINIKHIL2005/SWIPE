@@ -237,6 +237,19 @@ async function extractFromExcelBuffer(buf, debugLog) {
       cust = ''
     }
 
+    // Additional validation: skip rows where name is just a number (likely price/total rows)
+    if (name && /^\d+(\.\d+)?$/.test(name) && !cust) {
+      // This looks like a price/total row with no product context, skip it
+      if (debugLog) {
+        debugLog.push({ 
+          step: 'excel-skip-numeric-name', 
+          skipped: name, 
+          reason: 'Product name appears to be numeric value with no product context'
+        })
+      }
+      continue
+    }
+
     // Only record rows that look like data
     const hasAny = name || cust || unitPrice || qty || totalFromRow
     if (!hasAny) continue
