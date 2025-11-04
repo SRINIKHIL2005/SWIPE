@@ -213,10 +213,26 @@ async function extractFromExcelBuffer(buf, debugLog) {
     const date = String(dateKey ? r[dateKey] : '').trim()
     const serial = String(serialKey ? r[serialKey] : '').trim()
 
+    // Debug: log first few rows to understand the data structure
+    if (debugLog && products.length < 3) {
+      debugLog.push({ 
+        step: 'excel-row-debug', 
+        row: products.length, 
+        rawData: r,
+        extracted: { name, cust, unitPrice, qty, taxRate, totalFromRow, serial, date }
+      })
+    }
+
     // Smart detection: if customer field contains product names but product field is empty
     // This handles cases where columns are misaligned
     if (!name && cust && isProductLikeName(cust)) {
       // Swap: customer column actually contains product, product column is empty
+      name = cust
+      cust = ''
+    }
+
+    // If still no name, try to extract from the customer field (most likely scenario)
+    if (!name && cust) {
       name = cust
       cust = ''
     }
