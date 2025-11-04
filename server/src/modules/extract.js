@@ -193,6 +193,11 @@ async function extractFromExcelBuffer(buf, debugLog) {
   const customers = []
   const invoices = []
 
+  // Track the current customer across rows (for invoices with multiple line items)
+  let currentCustomer = ''
+  let currentSerial = ''
+  const customerTotals = new Map() // Track total per customer
+
   for (const r of rows) {
     const name = String(productKey ? r[productKey] : '').trim()
     const cust = String(custKey ? r[custKey] : '').trim()
@@ -211,20 +216,49 @@ async function extractFromExcelBuffer(buf, debugLog) {
     const hasAny = name || cust || unitPrice || qty || totalFromRow
     if (!hasAny) continue
 
+    // Update current customer if we have a new customer name (and it's not a product name)
+    if (cust && !isProductLikeName(cust)) {
+      currentCustomer = cust
+      // Add customer only once per unique name
+      if (!customers.find(c => c.name === cust)) {
+        customers.push({ name: cust, phone, totalPurchase: 0 }) // Will calculate total later
+      }
+      // Accumulate total for this customer
+      if (totalFromRow > 0) {
+        const existing = customerTotals.get(cust) || 0
+        customerTotals.set(cust, Math.max(existing, totalFromRow)) // Take the highest total seen
+      }
+    }
+
+    // Update current serial number
+    if (serial) {
+      currentSerial = serial
+    }
+
+    // Add products (only if we have a product name)
     if (name) {
       products.push({ name, unitPrice, taxRate, priceWithTax, quantity: qty })
     }
-    if (cust) {
-      customers.push({ name: cust, phone, totalPurchase: totalFromRow })
+
+    // Create invoice entry - use current customer even if row customer is empty
+    const invoiceCustomer = cust || currentCustomer
+    if (invoiceCustomer || name) {
+      invoices.push({
+        serialNumber: serial || currentSerial,
+        customerName: invoiceCustomer,
+        date,
+        items: name ? [{ productName: name, qty, unitPrice, taxRate }] : [],
+        tax: unitPrice * qty * taxRate,
+        totalAmount: totalFromRow || (unitPrice * qty * (1 + taxRate))
+      })
     }
-    invoices.push({
-      serialNumber: serial,
-      customerName: cust,
-      date,
-      items: name ? [{ productName: name, qty, unitPrice, taxRate }] : [],
-      tax: unitPrice * qty * taxRate,
-      totalAmount: totalFromRow || (unitPrice * qty * (1 + taxRate))
-    })
+  }
+
+  // Update customer totals
+  for (const customer of customers) {
+    if (customerTotals.has(customer.name)) {
+      customer.totalPurchase = customerTotals.get(customer.name)
+    }
   }
 
   // If still nothing, return empty
