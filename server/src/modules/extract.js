@@ -177,10 +177,11 @@ async function extractFromExcelBuffer(buf, debugLog) {
   // Map likely columns by fuzzy names (expanded synonyms)
   const header = Object.keys(rows[0] || {})
   const pick = (keys) => header.find(h => keys.some(k => h.toLowerCase().includes(k)))
-  const serialKey = pick(['serial','invoice','inv','bill no','bill','sno','sr no'])
-  const custKey = pick(['customer','party','client','buyer','name'])
+  const serialKey = pick(['serial number','serial','invoice','inv','bill no','bill','sno','sr no'])
+  // Be more specific about customer vs product fields
+  const custKey = pick(['customer name','customer','party','client','buyer']) // Don't just match 'name'
   const phoneKey = pick(['phone','mobile','contact'])
-  const productKey = pick(['product','item','description'])
+  const productKey = pick(['product','item','description','product name'])
   const qtyKey = pick(['qty','quantity','pcs','pieces','units'])
   const priceKey = pick(['unit price','unit','price','rate','amount'])
   const taxKey = pick(['tax','gst','cgst','sgst','igst','vat'])
@@ -199,8 +200,8 @@ async function extractFromExcelBuffer(buf, debugLog) {
   const customerTotals = new Map() // Track total per customer
 
   for (const r of rows) {
-    const name = String(productKey ? r[productKey] : '').trim()
-    const cust = String(custKey ? r[custKey] : '').trim()
+    let name = String(productKey ? r[productKey] : '').trim()
+    let cust = String(custKey ? r[custKey] : '').trim()
     const phone = String(phoneKey ? r[phoneKey] : '').trim()
     const unitPrice = Number(priceKey ? r[priceKey] : 0) || 0
     const qty = Number(qtyKey ? r[qtyKey] : 0) || 0
@@ -211,6 +212,14 @@ async function extractFromExcelBuffer(buf, debugLog) {
     const totalFromRow = Number(totalKey ? r[totalKey] : 0) || 0
     const date = String(dateKey ? r[dateKey] : '').trim()
     const serial = String(serialKey ? r[serialKey] : '').trim()
+
+    // Smart detection: if customer field contains product names but product field is empty
+    // This handles cases where columns are misaligned
+    if (!name && cust && isProductLikeName(cust)) {
+      // Swap: customer column actually contains product, product column is empty
+      name = cust
+      cust = ''
+    }
 
     // Only record rows that look like data
     const hasAny = name || cust || unitPrice || qty || totalFromRow
@@ -242,12 +251,12 @@ async function extractFromExcelBuffer(buf, debugLog) {
 
     // Create invoice entry - use current customer even if row customer is empty
     const invoiceCustomer = cust || currentCustomer
-    if (invoiceCustomer || name) {
+    if (name) { // Only create invoice if we have a product
       invoices.push({
         serialNumber: serial || currentSerial,
-        customerName: invoiceCustomer,
+        customerName: invoiceCustomer || 'Unknown Customer', // Default customer name
         date,
-        items: name ? [{ productName: name, qty, unitPrice, taxRate }] : [],
+        items: [{ productName: name, qty, unitPrice, taxRate }],
         tax: unitPrice * qty * taxRate,
         totalAmount: totalFromRow || (unitPrice * qty * (1 + taxRate))
       })
@@ -259,6 +268,22 @@ async function extractFromExcelBuffer(buf, debugLog) {
     if (customerTotals.has(customer.name)) {
       customer.totalPurchase = customerTotals.get(customer.name)
     }
+  }
+
+  // If no customers were found but we have invoices, create a default customer
+  if (customers.length === 0 && invoices.length > 0) {
+    const totalAmount = invoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0)
+    customers.push({
+      name: 'Unknown Customer',
+      phone: '',
+      totalPurchase: totalAmount
+    })
+    // Update invoices to use the default customer
+    invoices.forEach(inv => {
+      if (!inv.customerName || inv.customerName === 'Unknown Customer') {
+        inv.customerName = 'Unknown Customer'
+      }
+    })
   }
 
   // If still nothing, return empty
