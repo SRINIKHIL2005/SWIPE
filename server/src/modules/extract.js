@@ -223,31 +223,24 @@ async function extractFromExcelBuffer(buf, debugLog) {
       })
     }
 
-    // Smart detection: if customer field contains product names but product field is empty
-    // This handles cases where columns are misaligned
-    if (!name && cust && isProductLikeName(cust)) {
-      // Swap: customer column actually contains product, product column is empty
-      name = cust
-      cust = ''
-    }
-
-    // If still no name, try to extract from the customer field (most likely scenario)
-    if (!name && cust) {
-      name = cust
-      cust = ''
-    }
-
-    // Additional validation: skip rows where name is just a number (likely price/total rows)
-    if (name && /^\d+(\.\d+)?$/.test(name) && !cust) {
-      // This looks like a price/total row with no product context, skip it
+    // Skip rows where product name is just a number (likely price data, not actual products)
+    if (name && /^\d+(\.\d+)?$/.test(name)) {
       if (debugLog) {
         debugLog.push({ 
-          step: 'excel-skip-numeric-name', 
-          skipped: name, 
-          reason: 'Product name appears to be numeric value with no product context'
+          step: 'excel-skip-numeric-product', 
+          skipped: { customer: cust, product: name }, 
+          reason: 'Product appears to be numeric value (price), not actual product name'
         })
       }
       continue
+    }
+
+    // Don't treat customer names as products if we already have a product name
+    // Only swap if product field is empty AND customer field contains product-like names
+    if (!name && cust && isProductLikeName(cust)) {
+      // Customer field contains product name, product field is empty
+      name = cust
+      cust = ''
     }
 
     // Only record rows that look like data
@@ -261,11 +254,9 @@ async function extractFromExcelBuffer(buf, debugLog) {
       if (!customers.find(c => c.name === cust)) {
         customers.push({ name: cust, phone, totalPurchase: 0 }) // Will calculate total later
       }
-      // Accumulate total for this customer
-      if (totalFromRow > 0) {
-        const existing = customerTotals.get(cust) || 0
-        customerTotals.set(cust, Math.max(existing, totalFromRow)) // Take the highest total seen
-      }
+      // Accumulate total for this customer (sum all purchases, don't take max)
+      const existing = customerTotals.get(cust) || 0
+      customerTotals.set(cust, existing + totalFromRow)
     }
 
     // Update current serial number
